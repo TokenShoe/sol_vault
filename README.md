@@ -9,7 +9,9 @@ Sell:      user sells the meme on BSC, the USDC stays in the BSC vault
            -> backend calls debit twice in one tx -> Solana vault pays the user in USDC and the platform fee
 Rebalance: vault balance > watermark -> rebalancer calls rebalance_cctp -> program CPIs into Circle CCTP V2 to burn
            -> backend fetches the Circle attestation -> receiveMessage on the destination chain
-           -> USDC minted to our vault on that chain (Relay-based rebalancing not implemented yet)
+           -> USDC minted to our vault on that chain
+           chains CCTP does not reach (BSC ...): backend gets a Relay quote -> rebalancer calls rebalance_relay
+           -> program CPIs into the Relay Depository -> a Relay solver pays our vault on that chain within seconds
            vault balance too low -> top up with add_liquidity
 ```
 
@@ -59,6 +61,7 @@ Roles: pump has a single admin (a single-sig hot wallet `6aQt...` that both pays
 - Payouts use a generic `debit` like pump: the backend decides which pool (USDC / USDT) pays, and puts two debits (user + fee) in one tx; the program does not store a fee account
 - Three roles shared by all pools: **admin / operator / rebalancer**
 - CCTP destinations are whitelisted per domain (`CctpRoute`), so the rebalancer can only bridge to our own vaults
+- Relay (for chains without CCTP, e.g. BSC): funds can only go into the Relay Depository (fixed addresses in the program); the destination lives in Relay's off-chain order, so the backend checks every quote (`checkRelayQuote`) and a monitor checks every `RebalanceRelayEvent`
 - `initialize` can only be called by the program upgrade authority, like pump, to prevent front-running
 
 ---
@@ -67,7 +70,7 @@ Roles: pump has a single admin (a single-sig hot wallet `6aQt...` that both pays
 
 ```
 programs/cross_vault/src/
-├── lib.rs                  # program entry, 14 instructions
+├── lib.rs                  # program entry, 16 instructions
 ├── state.rs                # Config / Pool / CctpRoute accounts
 ├── events.rs               # events
 ├── errors.rs               # error codes
@@ -79,9 +82,11 @@ programs/cross_vault/src/
     ├── debit.rs            # debit
     ├── liquidity.rs        # add_liquidity
     ├── cctp_route.rs       # set_cctp_route / remove_cctp_route (register our vault contract on each destination chain)
-    └── rebalance_cctp.rs   # rebalance_cctp (CPI into CCTP V2 deposit_for_burn, recipient read from CctpRoute)
-idls/                       # official CCTP V2 IDLs (read from devnet); declare_program! generates the CPI client from them
+    ├── rebalance_cctp.rs   # rebalance_cctp (CPI into CCTP V2 deposit_for_burn, recipient read from CctpRoute)
+    └── rebalance_relay.rs  # rebalance_relay (CPI into Relay deposit_token) / reclaim_relay_refund
+idls/                       # official CCTP V2 IDLs (read from devnet) + minimal hand-written Relay Depository IDL; declare_program! generates the CPI clients
 tests/fixtures/cctp/        # CCTP programs and accounts dumped from devnet, loaded by the local validator (scripts/dump-cctp-fixtures.sh)
+tests/fixtures/relay/       # Relay Depository program + config account dumped from MAINNET (scripts/dump-relay-fixtures.sh) + a real quote for SDK tests
 client/vault-client.ts      # backend SDK
 tests/cross_vault.ts        # integration tests
 scripts/transfer-upgrade-authority.sh  # transfer the program upgrade authority after deployment (e.g. to a Squads multisig)
@@ -99,6 +104,7 @@ docs/devnet-testing-guide.md  # step-by-step devnet testing + reclaiming SOL aft
 | Pool | PDA `["pool", mint]` | **one per token**, created by `create_pool`; also the vault authority |
 | vault | PDA `["vault", pool]` | one token account per pool, holds that token |
 | CctpRoute | PDA `["cctp_route", domain (u32 LE)]` | one per CCTP destination chain, created by `set_cctp_route` (~0.0012 SOL rent) |
+| relay staging | ATA(mint, Pool) | one per pool, created by the first `rebalance_relay` (~0.002 SOL rent, paid by the rebalancer). Relay only accepts the sender's / refund recipient's ATA, and our vault is not an ATA, so Relay deposits pass through it and **Relay refunds land in it**; only the program can move funds out (`reclaim_relay_refund` -> vault) |
 
 Config fields:
 
@@ -107,7 +113,7 @@ Config fields:
 | `admin` | administrator: creates pools, updates roles and pool params, pauses, registers CCTP routes |
 | `pending_admin` | pending new admin (during a two-step transfer), all zeros if none |
 | `operator` | pays users and fees from the pools |
-| `rebalancer` | bridges the USDC above the watermark to vaults on other chains via CCTP |
+| `rebalancer` | bridges the funds above the watermark to vaults on other chains via CCTP (USDC) or Relay |
 
 Pool fields (one per token):
 
@@ -118,7 +124,7 @@ Pool fields (one per token):
 | `watermark` | watermark |
 | `max_debit_per_tx` | operator per-instruction `debit` limit, 0 = unlimited |
 | `deposit_paused` | deposits paused (V1/V2 deposits of this token) |
-| `withdraw_paused` | withdrawals paused (`debit` / `rebalance_cctp` of this token) |
+| `withdraw_paused` | withdrawals paused (`debit` / `rebalance_cctp` / `rebalance_relay` of this token) |
 
 CctpRoute fields (one per CCTP destination chain):
 
@@ -149,6 +155,8 @@ CctpRoute fields (one per CCTP destination chain):
 | `add_liquidity` | anyone | `amount` | tops up a pool from the caller's token account | `AddLiquidityEvent` (with `mint`) |
 | `set_cctp_route` | admin | `domain, mint_recipient` | adds or updates the address of our vault contract on a destination chain (the first call creates the CctpRoute account). `domain` cannot be 5 (Solana), the address cannot be all zeros | `CctpRouteSetEvent` (with the previous address) |
 | `remove_cctp_route` | admin | `domain` | removes the route: account closed, rent refunded to admin; rebalancing to that chain is then impossible | `CctpRouteRemovedEvent` |
+| `rebalance_relay` | rebalancer | `amount, order_id` (32 bytes) | for chains CCTP does not reach (BSC ...), any token Relay accepts (USDC / USDT). Checks: withdrawals not paused, `amount > 0`, `order_id` not all zeros (`InvalidOrderId`), balance after transfer >= watermark. Then vault -> relay staging -> CPI into Relay `deposit_token(amount, order_id)` signed by the Pool PDA (sender = depositor = Pool). The Relay program / depository / vault addresses are constants in the program. `order_id` comes from a Relay quote with `user = refundTo = Pool PDA` | `RebalanceRelayEvent` |
+| `reclaim_relay_refund` | anyone | — | moves the whole relay staging balance (Relay refunds) back into the vault; `InvalidAmount` if empty | `RelayRefundReclaimedEvent` |
 | `rebalance_cctp` | rebalancer | `amount, destination_domain` | **USDC pool only** (CCTP only supports Circle USDC; USDT calls are rejected by CCTP). The program CPIs into CCTP V2 `deposit_for_burn` as the USDC Pool PDA (**standard mode**: `min_finality_threshold = 2000`, `max_fee = 0`, `destination_caller` all zeros), burning vault USDC and creating a cross-chain message. Balance after transfer must be >= watermark; **the recipient is not passed by the caller**, it is read from the CctpRoute of `destination_domain` (unregistered domains fail with `AccountNotInitialized`). The accounts also include a freshly generated `message_sent_event_data` keypair (signer); its ~0.0039 SOL rent is paid by the rebalancer | `RebalanceCctpEvent` |
 
 **Full CCTP flow** (wrapped in `client/vault-client.ts`):
@@ -158,7 +166,17 @@ CctpRoute fields (one per CCTP destination chain):
 3. call MessageTransmitterV2 `receiveMessage(message, attestation)` on the destination chain. `destination_caller` is zero, so anyone can submit; the backend pays gas with its own EVM hot wallet;
 4. reclaim rent: every CCTP transfer creates a message account (required by CCTP; Circle's attestation service reads the message from it) whose ~0.0039 SOL rent is paid by the rebalancer. After the window expires, `reclaimCctpEventAccount(connection, rebalancerKp, signature, messageAccount)` refunds it. Safe to call repeatedly; returns `reclaimed` / `already_closed` / `attestation_pending` / `window_not_expired`, suitable for a daily backend cron job.
 
-> The program itself creates accounts only in three places: `initialize` creates the global Config (1); `create_pool` creates a Pool + vault per token (2); `set_cctp_route` creates one CctpRoute per destination chain. Day-to-day operations only emit events, which the backend persists.
+**Full Relay flow** (Solana mainnet only: Relay has no Solana devnet; wrapped in `client/vault-client.ts`, CLI `rebalance-relay`):
+1. `getRelayQuote({ mint, amount, destinationChainId: 56, destinationCurrency: BSC_USDT, recipient: BSC_VAULT })` calls `POST /quote/v2` with `user = refundTo = Pool PDA` and `includeProtocolData`;
+2. `checkRelayQuote(quote, request)` **refuses to continue unless**: there is exactly one Relay `deposit_token` instruction with our Pool / mint and Relay's fixed accounts; the amount and order id match; every destination payment goes to our vault in the requested token; there are no destination calls; the Solana refund goes to the Pool PDA; optional minimum output. It returns `orderId` / `requestId`;
+3. `rebalanceRelay(program, rebalancerKp, mint, amount, orderId)`: send soon after quoting, with exactly the quoted amount (otherwise Relay re-quotes or refunds);
+4. `indexRelayTx(signature, requestId)` calls `POST /transactions/index`, because the deposit happens inside our program (CPI);
+5. `getRelayStatus(requestId)` until success; the funds arrive on the destination chain within seconds;
+6. on failure Relay refunds automatically (minus gas) to `refundTo` = Pool, i.e. into the relay staging account; `reclaimRelayRefund` (or CLI `relay-reclaim`) moves it back into the vault. `getPoolStatus` returns `relayStagingBalance`.
+
+Relay addresses (Solana mainnet): program `99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2`, depository `Dodg2HifwU8rmaVVyMyUZDGTRbqAJTyVYxXPwcbNpBKc`, vault `7uTT8Xi5RWXzy7h9XL244GRgEycDYDhLjr3ZyNdXi8pZ` (its USDC account `4nvJ5zWdVspxJiNZzB127U6amPH98SFFkBx2JZrAduia` exists). Relay chain id of Solana: `792703809`; BSC: `56`. Fee measured on 2026-11-10: ~0.26 USDC per 100 USDC, ~22 USDC per 10,000 USDC (CCTP standard mode is free).
+
+> The program itself creates accounts only in three places: `initialize` creates the global Config (1); `create_pool` creates a Pool + vault per token (2); `set_cctp_route` creates one CctpRoute per destination chain (plus the relay staging ATA on a pool's first `rebalance_relay`). Day-to-day operations only emit events, which the backend persists.
 > Like pump, every instruction only emits events with `emit_cpi!` and writes no `msg!` logs: events are never truncated, and we save the compute of base58-encoding addresses on chain; on errors Anchor logs the error code automatically.
 
 | Network | CCTP addresses |
@@ -178,7 +196,7 @@ V2 encryption format (`encryptSwapParams` / `decryptSwapParams` in `client/vault
 - Layout: `[ephemeral pubkey 32 bytes][nonce 24 bytes][ciphertext]`; the plaintext is JSON `{"c":chainId,"r":recipient,"t":memeContract,"m":minOut}`
 - Platform key pair: generated with `generateEncryptionKeyPair()`; **the secretKey stays on the backend**, the publicKey goes to the frontend
 
-Error codes: `Unauthorized` (wrong role / initializer is not the upgrade authority), `DepositPaused`, `WithdrawPaused`, `InvalidAmount`, `InvalidAddress`, `InsufficientBalance`, `BelowWatermark`, `InvalidEncryptedParams`, `ExceedsMaxDebit`, `InvalidDestinationDomain`, `InvalidMintRecipient`, `DestinationIsVault`, `InvalidProgramData`, `UnsupportedMint`, `NotPendingAdmin`, `InvalidRole` (zero address for operator / rebalancer).
+Error codes: `Unauthorized` (wrong role / initializer is not the upgrade authority), `DepositPaused`, `WithdrawPaused`, `InvalidAmount`, `InvalidAddress`, `InsufficientBalance`, `BelowWatermark`, `InvalidEncryptedParams`, `ExceedsMaxDebit`, `InvalidDestinationDomain`, `InvalidMintRecipient`, `DestinationIsVault`, `InvalidProgramData`, `UnsupportedMint`, `NotPendingAdmin`, `InvalidRole` (zero address for operator / rebalancer), `InvalidOrderId` (all-zero Relay order id).
 
 ---
 
@@ -187,7 +205,8 @@ Error codes: `Unauthorized` (wrong role / initializer is not the upgrade authori
 ```ts
 import { getProgram, buildDepositTx, assertSafeForFeePayer, orderId, MINTS, createPool, setPoolConfig,
          payoutToUser, debitIx, addLiquidity, rebalanceCctp, setCctpRoute, fetchCctpAttestation, CCTP, getPoolStatus,
-         reclaimCctpEventAccount, listenEvents, backfillEvents } from "./client/vault-client";
+         reclaimCctpEventAccount, getRelayQuote, checkRelayQuote, rebalanceRelay, indexRelayTx, getRelayStatus,
+         reclaimRelayRefund, listenEvents, backfillEvents } from "./client/vault-client";
 
 const program = getProgram(connection);
 const USDC = MINTS.USDC_MAINNET, USDT = MINTS.USDT_MAINNET;
@@ -233,7 +252,7 @@ await transferAdmin(program, adminKp, newAdmin.publicKey); // step 1: nominate
 await acceptAdmin(program, newAdminKp);                    // step 2: the new admin accepts
 
 // 5) rebalancing (rebalancer): check each pool's balance
-const s = await getPoolStatus(program, USDC); // { pool, balance, watermark, excess, deficit }
+const s = await getPoolStatus(program, USDC); // { pool, balance, relayStagingBalance, watermark, excess, deficit }
 if (s.excess > 0n) {
   // bridge to the Ethereum vault (domain 0) via CCTP; the recipient is the one admin registered with setCctpRoute
   const { signature, messageSentEventData } = await rebalanceCctp(program, rebalancerKp, USDC, s.excess, CCTP.DOMAIN.ETHEREUM);
@@ -243,7 +262,17 @@ if (s.excess > 0n) {
   await reclaimCctpEventAccount(connection, rebalancerKp, signature, messageSentEventData, { testnet: false });
 }
 if (s.deficit > 0n) await addLiquidity(program, rebalancerKp, USDC, s.deficit);
-// the USDT pool cannot use CCTP: surplus USDT currently needs manual handling (Relay later, or swap to USDC first)
+
+// 6) rebalancing via Relay (chains without CCTP, e.g. BSC; also works for USDT)
+const s2 = await getPoolStatus(program, USDT);
+const req = { mint: USDT, amount: s2.excess, destinationChainId: 56,
+              destinationCurrency: "0x55d398326f99059ff775485246999027b3197955" /* BSC USDT */, recipient: BSC_VAULT };
+const checked = checkRelayQuote(await getRelayQuote(req), { ...req, minAmountOut: MIN_OUT }); // throws if unsafe
+const sig = await rebalanceRelay(program, rebalancerKp, USDT, req.amount, checked.orderId);
+await indexRelayTx(sig, checked.requestId);
+await getRelayStatus(checked.requestId); // poll until success
+// if Relay refunded (getPoolStatus(...).relayStagingBalance > 0): move it back into the vault
+await reclaimRelayRefund(program, anyKp, USDT);
 ```
 
 ---
@@ -274,6 +303,7 @@ See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create account
 2. **Initialize**: call `initialize` with the deploying wallet (only the upgrade authority can)
 3. **Create pools**: admin calls `create_pool(watermark, per-tx limit)` for every supported token (USDC, USDT ...)
 4. **Register CCTP routes**: admin calls `set_cctp_route(domain, our vault contract)` for every destination chain
+4.1 **Relay**: check Relay's token account exists for every token you will send (`ATA(mint, 7uTT8Xi5…)`; USDC exists), then run one small end-to-end `rebalance-relay` (e.g. 5 USDC) and confirm arrival and the refund path before automating it
 5. **Transfer the upgrade authority to a multisig**:
    ```bash
    # pass the Squads multisig "vault address" (Vault address in the Squads UI, not the Multisig account address)
@@ -290,7 +320,7 @@ See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create account
 
 ## 7. Notes & possible improvements
 
-1. **Status (2026-11-09)**: `anchor build` succeeds on Anchor 1.2.2 and `anchor test --validator legacy` passes 24/24 (including USDC + USDT multi-token: pool isolation, per-pool pause, USDT cannot use CCTP; CCTP routes; the local validator loads the real CCTP V2 programs dumped from devnet and the CCTP test checks every field of the generated message). `transfer-upgrade-authority.sh` was tested on a local validator (refuses when uninitialized, cancels on a wrong confirmation code, transfer to a keypair, transfer to a pubkey, refuses without authority).
+1. **Status (2026-11-10)**: `anchor build` succeeds on Anchor 1.2.2 and `anchor test --validator legacy` passes 28/28 (Relay: the local validator loads the real Relay Depository dumped from mainnet; the CPI deposit, Relay's own `DepositEvent`, refund reclaim and the quote checks against a saved real quote are tested; a real mainnet Relay transfer has NOT been done yet; including USDC + USDT multi-token: pool isolation, per-pool pause, USDT cannot use CCTP; CCTP routes; the local validator loads the real CCTP V2 programs dumped from devnet and the CCTP test checks every field of the generated message). `transfer-upgrade-authority.sh` was tested on a local validator (refuses when uninitialized, cancels on a wrong confirmation code, transfer to a keypair, transfer to a pubkey, refuses without authority).
 2. **feepayer safety**: always call `assertSafeForFeePayer` before signing, otherwise anyone could make the platform pay gas for arbitrary transactions.
 3. **Duplicate payouts are prevented by the backend**: the program keeps no on-chain order records (kept simple, like pump); the backend must be idempotent by `order_id` and check whether an order was already paid before paying.
 4. **initialize is restricted to the upgrade authority** to prevent front-running. If the upgrade authority is later moved to a multisig, initialize first or send initialize through the multisig; `[test] upgradeable = true` in `Anchor.toml` makes the local validator's upgrade authority the test wallet.
@@ -298,7 +328,9 @@ See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create account
 6. **admin is powerful**: it could make itself rebalancer, register its own address as a route and set the watermark to 0 to drain funds. Use a multisig (Squads) for admin on mainnet.
 6.1 **rebalance_cctp can only bridge to destination vaults registered by admin** (CctpRoute, one address per domain): if the rebalancer key leaks, an attacker can at most move the funds above the watermark to our own vaults on other chains. Changing a route requires the admin signature (a multisig on mainnet). The program does not check that the first 12 bytes of an EVM address are zero (Sui / Aptos use 32-byte addresses); the SDK's `setCctpRoute` pads 0x addresses automatically; verify routes with `yarn -s cli status` after registering.
 7. **Per-pool debit limit**: `max_debit_per_tx` defaults to 0 (unlimited, like pump). On mainnet set it to the largest normal single order; raise it temporarily via admin or split large orders. It only limits each instruction: a leaked operator key can still drain via many debits, so keep the operator key in a secure signing service (KMS/HSM), monitor `DebitEvent` in the backend, and pause withdrawals of that pool with `set_pause_flags` on anomalies.
-7.1 **USDT**: USDT cannot use CCTP, so surplus USDT currently needs manual handling (Relay later, or swap to USDC on Solana first); Tether can freeze USDT, so keep the USDT watermark low; the backend decides which token users buy with and get paid in, and must account per `mint`.
+6.2 **rebalance_relay cannot verify the destination on chain**: Relay's `order_id` is only a hash of its off-chain order, so a leaked rebalancer key could request a quote paying an attacker and deposit up to the funds above the watermark. Mitigations: `checkRelayQuote` before every deposit; a monitor that looks up each `RebalanceRelayEvent.order_id` in the Relay API and calls `set_pause_flags` on mismatch; keep the watermark-excess small; keep the rebalancer key in a signing service. Rare edge case: if Relay can neither fill nor refund, the funds stay credited to the depositor (the Pool PDA) and need a signed Relay withdrawal, which a PDA cannot produce; that would need Relay support.
+6.3 **Relay token accounts**: Relay creates its token account on first deposit of a token, paid by the sender; the Pool PDA cannot pay, so deposits of a token Relay has never received fail (check `ATA(mint, Relay vault)` first; the CLI does).
+7.1 **USDT**: USDT cannot use CCTP; rebalance it with `rebalance_relay` (or swap to USDC on Solana first); Tether can freeze USDT, so keep the USDT watermark low; the backend decides which token users buy with and get paid in, and must account per `mint`.
 8. **TS**: the Anchor 1.x TS client does not infer `tokenProgram`; pass `TOKEN_PROGRAM_ID` explicitly. Use `confirmed` for the provider.
 9. **Reserved space before mainnet**: consider adding a `_reserved: [u8; N]` field at the end of Config and Pool so future fields can be added through upgrades without data migration.
-10. **Optional enhancements**: on-chain order de-duplication (one PDA per order or a bitmap), multiple operators, Relay-based rebalancing for chains without CCTP.
+10. **Optional enhancements**: on-chain order de-duplication (one PDA per order or a bitmap), multiple operators, a separate per-tx cap for `rebalance_relay` (in a new account, so the Pool layout does not change).

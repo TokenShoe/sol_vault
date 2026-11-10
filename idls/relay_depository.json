@@ -1,0 +1,36 @@
+{
+  "address": "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2",
+  "metadata": {
+    "name": "relay_depository",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Minimal hand-written IDL of the Relay Depository (SVM): only deposit_token, which cross_vault CPIs into. Source: https://github.com/relayprotocol/relay-depository/blob/main/packages/solana-vm/programs/relay-depository/src/lib.rs",
+    "repository": "https://github.com/relayprotocol/relay-depository"
+  },
+  "instructions": [
+    {
+      "name": "deposit_token",
+      "discriminator": [11, 156, 96, 218, 39, 163, 180, 19],
+      "accounts": [
+        { "name": "relay_depository" },
+        { "name": "sender", "writable": true, "signer": true },
+        { "name": "depositor" },
+        { "name": "vault" },
+        { "name": "mint" },
+        { "name": "sender_token_account", "writable": true },
+        { "name": "vault_token_account", "writable": true },
+        { "name": "token_program" },
+        { "name": "associated_token_program" },
+        { "name": "system_program" }
+      ],
+      "args": [
+        { "name": "amount", "type": "u64" },
+        { "name": "id", "type": { "array": ["u8", 32] } }
+      ]
+    }
+  ],
+  "accounts": [],
+  "events": [],
+  "errors": [],
+  "types": []
+}

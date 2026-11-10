@@ -85,6 +85,30 @@ pub struct RebalanceCctpEvent {
     pub timestamp: i64,
 }
 
+/// The rebalancer deposited the pool's funds above the watermark into the Relay Depository (for chains CCTP does not reach, e.g. BSC).
+/// The destination recipient lives in Relay's off-chain order; the monitor checks order_id against the Relay API
+#[event]
+pub struct RebalanceRelayEvent {
+    pub rebalancer: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    /// Relay orderId (from the quote)
+    pub order_id: [u8; 32],
+    pub watermark: u64,
+    pub vault_balance: u64,
+    pub timestamp: i64,
+}
+
+/// A Relay refund was moved from the relay staging account back into the vault
+#[event]
+pub struct RelayRefundReclaimedEvent {
+    pub caller: Pubkey,
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub vault_balance: u64,
+    pub timestamp: i64,
+}
+
 /// admin created a new pool (added a supported token)
 #[event]
 pub struct PoolCreatedEvent {

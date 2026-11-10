@@ -453,7 +453,7 @@ Lists all program events in chronological order. V2 deposits are **decrypted aut
 
 The script asks for the last 4 characters of the program id (`v2rK`) to confirm.
 
-### 5.12 Program upgrade (example: adding CCTP routes)
+### 5.12 Program upgrade (example: adding CCTP routes and Relay rebalancing)
 
 Solana programs can be upgraded in place: **the program address stays the same and existing on-chain data (Config, Pool, the funds in the vaults) is kept**; only the code is replaced. Only the upgrade authority (admin here) can upgrade.
 
@@ -461,7 +461,7 @@ Solana programs can be upgraded in place: **the program address stays the same a
 
 | Change | Upgrade directly? |
 |---|---|
-| new instructions, new account types (here: `CctpRoute`) | ✅ yes, old data is unaffected |
+| new instructions, new account types (here: `CctpRoute`, `rebalance_relay` / `reclaim_relay_refund`) | ✅ yes, old data is unaffected |
 | changed instruction args (here: `rebalance_cctp` dropped `mint_recipient`) | ✅ yes, but old SDK / backend calls will fail, so update them **at the same time** |
 | changed fields of existing accounts (Config / Pool): add/remove, reorder, change type | ❌ no: old accounts keep the old layout and the new code would read garbage; a migration instruction is needed (or reserve space up front) |
 
@@ -470,7 +470,7 @@ Solana programs can be upgraded in place: **the program address stays the same a
 ```bash
 NO_DNA=1 ~/.avm/bin/anchor-1.2.2 build
 solana address -k target/deploy/cross_vault-keypair.json   # must still be A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK
-ls -l target/deploy/cross_vault.so                         # new version ~431KB (old one 397KB)
+ls -l target/deploy/cross_vault.so                         # new version ~482KB (old one 397KB)
 ```
 
 **③ Upgrade (same command as the first deploy)**
@@ -484,8 +484,8 @@ solana program deploy target/deploy/cross_vault.so \
 ```
 
 - The program already exists, so the CLI runs the upgrade flow: it writes the new code into a temporary buffer account, then swaps it in at once.
-- The buffer temporarily needs ~2.2 SOL rent, refunded to admin after the upgrade.
-- If the new code is larger, the CLI extends the program automatically (`extend`); the extra space costs additional rent (~0.005 SOL per KB, ~0.18 SOL here) which stays locked while the program exists.
+- The buffer temporarily needs ~2.5 SOL rent, refunded to admin after the upgrade.
+- If the new code is larger, the CLI extends the program automatically (`extend`); the extra space costs additional rent (~0.005 SOL per KB, ~0.43 SOL here) which stays locked while the program exists.
 - If it fails midway, reclaim the buffer as described in section 7 ("Max retries exceeded") and run it again.
 - Until the upgrade is done, the new CLI cannot call the old program for changed instructions (`rebalance-cctp`, `set-route`).
 
@@ -498,6 +498,33 @@ yarn -s cli set-route --domain 0    # the new instruction works
 ```
 
 > Mainnet: once the upgrade authority belongs to a Squads multisig, upgrades are proposed in Squads and approved by the members (upload the buffer with `solana program write-buffer` first, then create a "program upgrade" proposal in Squads).
+
+### 5.13 Relay rebalance: Solana -> BSC (MAINNET only, small amounts)
+
+Relay has **no Solana devnet deployment** (its testnet API lists no Solana chain), so this cannot be tested on devnet. The local tests (`anchor test`) already run the real Relay program dumped from mainnet; the real end-to-end check must be done on mainnet with a few USDC.
+
+Preparation (once): a mainnet deployment of the program with a USDC pool, and a key directory for mainnet, e.g. `keys/mainnet` (admin, rebalancer with ~0.01 SOL, `evm.json` = the BSC receiving address) and `usdc-mint.txt` = `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`.
+
+```bash
+export RPC_URL=<mainnet RPC, e.g. Helius mainnet>  KEYS_DIR=keys/mainnet
+# optional: export RELAY_API_KEY=...   (higher rate limits)
+
+# 1. quote only (no transaction): checks the quote and prints output, fee, orderId
+yarn -s cli relay-quote --amount 5                      # default: to BSC (56) USDT, recipient = evm.json address
+yarn -s cli relay-quote --amount 5 --to-token 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d   # BSC USDC instead
+
+# 2. bridge 5 USDC above the watermark (fails with BelowWatermark otherwise; --min-out guards the output)
+yarn -s cli rebalance-relay --amount 5 --min-out 4.9
+
+# 3. status (requestId printed by step 2) -> "success"; then check the BSC address on bscscan
+yarn -s cli relay-status --request 0x...
+
+# 4. if Relay refunded, the USDC is in "relay staging" (shown by status); move it back into the vault
+yarn -s cli status
+yarn -s cli relay-reclaim
+```
+
+What `rebalance-relay` does: gets a quote with user = refundTo = the USDC Pool PDA -> `checkRelayQuote` (Relay instruction, accounts, amount, order id, every recipient = our address, refunds to the Pool, minimum output) -> sends `rebalance_relay(amount, orderId)` -> notifies Relay with `POST /transactions/index`.
 
 ### Feature test checklist
 
@@ -516,6 +543,7 @@ yarn -s cli set-route --domain 0    # the new instruction works
 | 5.10 | events and V2 decryption | ☐ |
 | 5.11 | upgrade-authority transfer script | ☐ |
 | 5.12 | program upgrade | ☐ |
+| 5.13 | Relay (mainnet): quote check -> deposit -> received on BSC; refund reclaim | ☐ |
 
 ---
 
@@ -549,6 +577,9 @@ yarn -s cli status      # program config, pool status, CCTP routes
 | `rebalance-cctp` fails with CCTP errors like `InvalidLocalTokenState` | not Circle USDC (option B's self-issued token cannot be bridged) |
 | `cctp-receive` fails with `insufficient funds` | the Sepolia wallet has no ETH, get some from the faucet |
 | `cctp-receive` fails with `Nonce already used` | the message was already received |
+| `rebalance-relay` / `relay-quote`: `unsafe Relay quote: ...` | the quote did not pass the safety check (e.g. `minimum output ... < ...`: lower `--min-out` or try later); nothing was sent |
+| `relay-quote` fails with `Relay quote failed (400)` | the token or amount is not supported by Relay; on devnet always (Relay is mainnet only); amounts that are too small cannot cover fees |
+| `rebalance-relay`: `Relay has no token account for ...` | Relay has never received this token, so a PDA cannot be the first depositor; use USDC / USDT |
 | Node connection timeouts | check the proxy: `echo $https_proxy`; the CLI uses it automatically |
 
 ---

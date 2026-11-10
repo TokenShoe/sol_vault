@@ -4,6 +4,8 @@
  *  - V2 param encryption / decryption (x25519 + XSalsa20-Poly1305, tweetnacl)
  *  - operator: debitIx (single transfer-out instruction) / payoutToUser (one tx: create the user's token account + pay the user + pay the fee)
  *  - rebalancer: rebalanceCctp (CCTP V2 cross-chain rebalance) / addLiquidity; fetchCctpAttestation queries Circle attestations; reclaimCctpEventAccount reclaims message-account rent
+ *  - rebalancer: Relay rebalance for chains CCTP does not reach (BSC ...): getRelayQuote -> checkRelayQuote -> rebalanceRelay -> indexRelayTx -> getRelayStatus;
+ *    reclaimRelayRefund moves Relay refunds back into the vault
  *  - admin: createPool (add a token) / setPoolConfig / setPauseFlags / setRoles / transferAdmin / acceptAdmin
  *  - admin: setCctpRoute / removeCctpRoute (register our vault contract on each destination chain; rebalance can only go there)
  *  - Multi-token: one pool per token; every fund-related function takes a mint (USDC / USDT ...)
@@ -460,6 +462,226 @@ export async function reclaimCctpEventAccount(
   }
 }
 
+// ------------------------------ Relay rebalance (chains CCTP does not reach, e.g. BSC) ------------------------------
+/** Relay Depository on Solana mainnet (Relay has no Solana testnet deployment) */
+export const RELAY = {
+  PROGRAM: new PublicKey("99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2"),
+  /** PDA ["relay_depository"] */
+  DEPOSITORY: new PublicKey("Dodg2HifwU8rmaVVyMyUZDGTRbqAJTyVYxXPwcbNpBKc"),
+  /** PDA ["vault"], owner of the Relay token accounts */
+  VAULT: new PublicKey("7uTT8Xi5RWXzy7h9XL244GRgEycDYDhLjr3ZyNdXi8pZ"),
+  /** Relay's chain id for Solana */
+  SOLANA_CHAIN_ID: 792703809,
+  /** sha256("global:deposit_token")[0..8] */
+  DEPOSIT_TOKEN_DISCRIMINATOR: Buffer.from("0b9c60da27a3b413", "hex"),
+  API: "https://api.relay.link",
+} as const;
+
+/** Relay staging account = ATA(mint, Pool PDA): source of Relay deposits and destination of Relay refunds */
+export const relayStagingAddress = (mint: PublicKey) => getAssociatedTokenAddressSync(mint, poolPda(mint), true);
+
+/** Relay's token account for this mint = ATA(mint, Relay vault); must already exist on chain */
+export const relayVaultTokenAddress = (mint: PublicKey) => getAssociatedTokenAddressSync(mint, RELAY.VAULT, true);
+
+export interface RelayQuoteRequest {
+  mint: PublicKey;
+  amount: bigint | number;
+  destinationChainId: number;
+  /** Token on the destination chain, e.g. BSC USDT 0x55d3... */
+  destinationCurrency: string;
+  /** Our vault on the destination chain */
+  recipient: string;
+  /** Slippage in basis points (optional, Relay default otherwise) */
+  slippageBps?: number;
+  apiKey?: string;
+}
+
+/**
+ * Request a Relay quote for a vault rebalance: user = refundTo = Pool PDA, so the deposit is made (and refunded) by the Pool.
+ * includeProtocolData returns the order (orderId, recipients, refunds) so it can be checked before sending.
+ */
+export async function getRelayQuote(q: RelayQuoteRequest): Promise<any> {
+  const pool = poolPda(q.mint).toBase58();
+  const body: Record<string, unknown> = {
+    user: pool,
+    refundTo: pool,
+    recipient: q.recipient,
+    originChainId: RELAY.SOLANA_CHAIN_ID,
+    destinationChainId: q.destinationChainId,
+    originCurrency: q.mint.toBase58(),
+    destinationCurrency: q.destinationCurrency,
+    amount: q.amount.toString(),
+    tradeType: "EXACT_INPUT",
+    includeProtocolData: true,
+  };
+  if (q.slippageBps !== undefined) body.slippageTolerance = String(q.slippageBps);
+  const res = await fetch(`${RELAY.API}/quote/v2`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(q.apiKey ? { "x-api-key": q.apiKey } : {}) },
+    body: JSON.stringify(body),
+  });
+  const json: any = await res.json();
+  if (!res.ok) throw new Error(`Relay quote failed (${res.status}): ${json?.message ?? JSON.stringify(json)}`);
+  return json;
+}
+
+export interface CheckedRelayQuote {
+  /** 32-byte Relay order id, passed to rebalance_relay */
+  orderId: number[];
+  /** Relay request id used for /intents/status and /transactions/index */
+  requestId: string;
+  amount: bigint;
+  /** Expected / minimum output on the destination chain (destination token's smallest unit) */
+  expectedOut: string;
+  minimumOut: string;
+}
+
+/**
+ * Check a Relay quote before depositing; throws on any mismatch. The program cannot see the destination recipient,
+ * so this check (and the monitor) is what keeps the funds going to our own vault.
+ *  - exactly one deposit step with one Relay deposit_token instruction, accounts = our Pool / mint, Relay's fixed accounts
+ *  - instruction amount and id match the request and protocol.v2.orderId
+ *  - destination chain / token / every recipient = our vault; the Solana refund goes to the Pool PDA
+ *  - optional minimum output
+ */
+export function checkRelayQuote(
+  quote: any,
+  q: RelayQuoteRequest & { minAmountOut?: bigint }
+): CheckedRelayQuote {
+  const fail = (m: string): never => {
+    throw new Error(`unsafe Relay quote: ${m}`);
+  };
+  const pool = poolPda(q.mint);
+  const amount = BigInt(q.amount.toString());
+
+  const steps = quote?.steps ?? [];
+  if (steps.length !== 1 || steps[0].id !== "deposit" || steps[0].kind !== "transaction")
+    fail(`expected a single deposit step, got ${steps.map((s: any) => s.id).join(",")}`);
+  const ixs = steps[0].items?.[0]?.data?.instructions ?? [];
+  const relayIxs = ixs.filter((i: any) => i.programId === RELAY.PROGRAM.toBase58());
+  if (relayIxs.length !== 1) fail(`expected one Relay instruction, got ${relayIxs.length}`);
+  const ix = relayIxs[0];
+  const keys: string[] = ix.keys.map((k: any) => k.pubkey);
+  const expectKeys = [RELAY.DEPOSITORY, pool, pool, RELAY.VAULT, q.mint].map((k) => k.toBase58());
+  expectKeys.forEach((k, i) => keys[i] === k || fail(`instruction account #${i} is ${keys[i]}, expected ${k}`));
+  if (keys[6] !== relayVaultTokenAddress(q.mint).toBase58()) fail("unexpected Relay vault token account");
+
+  const data = Buffer.from(ix.data, /^[0-9a-f]+$/i.test(ix.data) ? "hex" : "base64");
+  if (data.length !== 48 || !data.subarray(0, 8).equals(RELAY.DEPOSIT_TOKEN_DISCRIMINATOR)) fail("not a deposit_token instruction");
+  if (data.readBigUInt64LE(8) !== amount) fail(`instruction amount ${data.readBigUInt64LE(8)} != ${amount}`);
+  const id = data.subarray(16, 48);
+
+  const v2 = quote?.protocol?.v2 ?? fail("missing protocol data (includeProtocolData)");
+  if (Buffer.from(String(v2.orderId).replace(/^0x/, ""), "hex").compare(id) !== 0) fail("instruction id != protocol orderId");
+
+  const out = quote?.details?.currencyOut;
+  if (Number(out?.currency?.chainId) !== q.destinationChainId) fail(`destination chain ${out?.currency?.chainId}`);
+  if (String(out?.currency?.address).toLowerCase() !== q.destinationCurrency.toLowerCase()) fail(`destination token ${out?.currency?.address}`);
+  const payments = v2.orderData?.output?.payments ?? [];
+  if (payments.length === 0) fail("order has no output payments");
+  for (const p of payments) {
+    if (String(p.recipient).toLowerCase() !== q.recipient.toLowerCase()) fail(`order pays ${p.recipient}`);
+    if (String(p.currency).toLowerCase() !== q.destinationCurrency.toLowerCase()) fail(`order pays token ${p.currency}`);
+  }
+  if ((v2.orderData?.output?.calls ?? []).length > 0) fail("order contains destination calls");
+  for (const input of v2.orderData?.inputs ?? []) {
+    if (input.payment?.chainId !== "solana" || BigInt(input.payment?.amount ?? -1) !== amount) fail("order input mismatch");
+    for (const r of input.refunds ?? []) {
+      const ok = r.chainId === "solana" ? r.recipient === pool.toBase58() : String(r.recipient).toLowerCase() === q.recipient.toLowerCase();
+      if (!ok) fail(`refund on ${r.chainId} goes to ${r.recipient}`);
+    }
+  }
+  if (q.minAmountOut !== undefined && BigInt(out.minimumAmount) < q.minAmountOut)
+    fail(`minimum output ${out.minimumAmount} < ${q.minAmountOut}`);
+
+  return {
+    orderId: Array.from(id),
+    requestId: steps[0].requestId ?? quote.requestId,
+    amount,
+    expectedOut: out.amount,
+    minimumOut: out.minimumAmount,
+  };
+}
+
+/** Accounts required by rebalance_relay */
+export function relayAccounts(mint: PublicKey) {
+  return {
+    relayStaging: relayStagingAddress(mint),
+    relayProgram: RELAY.PROGRAM,
+    relayDepository: RELAY.DEPOSITORY,
+    relayVault: RELAY.VAULT,
+    relayVaultTokenAccount: relayVaultTokenAddress(mint),
+  };
+}
+
+/** Build the rebalance_relay instruction (orderId from checkRelayQuote) */
+export async function rebalanceRelayIx(
+  program: Program<CrossVault>,
+  rebalancer: PublicKey,
+  mint: PublicKey,
+  amount: bigint | number,
+  relayOrderId: number[]
+): Promise<TransactionInstruction> {
+  return program.methods
+    .rebalanceRelay(bn(amount), relayOrderId)
+    .accountsPartial({
+      rebalancer,
+      mint,
+      pool: poolPda(mint),
+      vault: vaultAddress(mint),
+      tokenProgram: TOKEN_PROGRAM_ID,
+      ...relayAccounts(mint),
+    })
+    .instruction();
+}
+
+/** Deposit into Relay for a checked quote; returns the tx signature */
+export async function rebalanceRelay(
+  program: Program<CrossVault>,
+  rebalancer: Keypair,
+  mint: PublicKey,
+  amount: bigint | number,
+  relayOrderId: number[]
+): Promise<string> {
+  const ix = await rebalanceRelayIx(program, rebalancer.publicKey, mint, amount, relayOrderId);
+  const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }), ix);
+  return sendAndConfirmTransaction(program.provider.connection, tx, [rebalancer], { commitment: "confirmed" });
+}
+
+/** Tell Relay about a transaction whose deposit happened inside our program (CPI), so it is picked up promptly */
+export async function indexRelayTx(signature: string, requestId?: string, apiKey?: string): Promise<string> {
+  const res = await fetch(`${RELAY.API}/transactions/index`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(apiKey ? { "x-api-key": apiKey } : {}) },
+    body: JSON.stringify({ chainId: String(RELAY.SOLANA_CHAIN_ID), txHash: signature, ...(requestId ? { requestId } : {}) }),
+  });
+  const json: any = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`Relay transactions/index failed (${res.status}): ${json?.message ?? ""}`);
+  return json?.message ?? "ok";
+}
+
+/** Relay request status: waiting / pending / success / failure / refund ... */
+export async function getRelayStatus(requestId: string): Promise<any> {
+  const res = await fetch(`${RELAY.API}/intents/status/v3?requestId=${requestId}`);
+  return res.json();
+}
+
+/** Move Relay refunds from the relay staging account back into the vault (anyone may call) */
+export async function reclaimRelayRefund(program: Program<CrossVault>, caller: Keypair, mint: PublicKey): Promise<string> {
+  return program.methods
+    .reclaimRelayRefund()
+    .accountsPartial({
+      caller: caller.publicKey,
+      mint,
+      pool: poolPda(mint),
+      vault: vaultAddress(mint),
+      relayStaging: relayStagingAddress(mint),
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .signers([caller])
+    .rpc();
+}
+
 // ------------------------------ admin ------------------------------
 /** Add a supported token: create its pool and vault (admin) */
 export async function createPool(
@@ -566,9 +788,12 @@ export async function getPoolStatus(program: Program<CrossVault>, mint: PublicKe
   const bal = await program.provider.connection.getTokenAccountBalance(pool.vault);
   const balance = BigInt(bal.value.amount);
   const watermark = BigInt(pool.watermark.toString());
+  // Relay staging account (Relay refunds land here); absent until the first rebalance_relay
+  const staging = await program.provider.connection.getTokenAccountBalance(relayStagingAddress(mint)).catch(() => null);
   return {
     pool,
     balance,
+    relayStagingBalance: staging ? BigInt(staging.value.amount) : 0n,
     watermark,
     excess: balance > watermark ? balance - watermark : 0n,
     deficit: balance < watermark ? watermark - balance : 0n,

@@ -5,7 +5,9 @@
 //! - vault     PDA ["vault", pool]                     one token account per pool, authority = Pool
 //! - CctpRoute PDA ["cctp_route", domain (u32 LE)]     one per destination chain: address of our vault contract on that chain
 //!
-//! Day-to-day operations (deposit, payout, add liquidity, bridging) only emit events and never create accounts; accounts are created only by initialize, create_pool and set_cctp_route.
+//! - relay staging ATA(mint, Pool)                    per pool, created on the first rebalance_relay: Relay deposit source / refund destination
+//!
+//! Day-to-day operations (deposit, payout, add liquidity, bridging) only emit events and never create accounts; accounts are created only by initialize, create_pool, set_cctp_route and the first rebalance_relay of a pool.
 use anchor_lang::prelude::*;
 
 pub const CONFIG_SEED: &[u8] = b"config";
@@ -23,7 +25,7 @@ pub struct Config {
     pub pending_admin: Pubkey,
     /// operator: after a user sells a meme on another chain, calls debit to pay the user and the fee from a pool (the backend chooses the pool)
     pub operator: Pubkey,
-    /// rebalancer: bridges the amount above the watermark to vaults on other chains via CCTP (only the USDC pool supports CCTP)
+    /// rebalancer: bridges the amount above the watermark to vaults on other chains via CCTP (USDC only) or Relay
     pub rebalancer: Pubkey,
     pub bump: u8,
 }
@@ -42,7 +44,7 @@ pub struct Pool {
     pub max_debit_per_tx: u64,
     /// Deposit pause: deposit_for_swap / deposit_for_swap_v2 are disabled for this pool
     pub deposit_paused: bool,
-    /// Withdraw pause: debit / rebalance_cctp are disabled for this pool
+    /// Withdraw pause: debit / rebalance_cctp / rebalance_relay are disabled for this pool
     pub withdraw_paused: bool,
     pub bump: u8,
 }

@@ -3,8 +3,9 @@
 //! Roles:
 //! - admin: create pools (add tokens), update roles and pool params, pause deposits/withdrawals per pool, two-step admin transfer, register CCTP destination vaults
 //! - operator: after a user sells a meme on another chain, pays the user (+ fee) from the pool chosen by the backend
-//! - rebalancer: bridges the USDC above the pool watermark to vaults on other chains via CCTP
-//!   (recipient addresses are registered per domain by admin via set_cctp_route; the rebalancer can only pick a domain)
+//! - rebalancer: bridges the funds above the pool watermark to vaults on other chains
+//!   - via CCTP (recipient addresses are registered per domain by admin via set_cctp_route; the rebalancer can only pick a domain)
+//!   - via Relay for chains CCTP does not reach, e.g. BSC (funds can only go into the Relay Depository)
 //!
 //! Flow: user deposit_for_swap -> event -> backend buys the meme on BSC;
 //!       user sells on BSC -> backend calls debit twice in one transaction: once to the user, once to the fee account.
@@ -90,6 +91,17 @@ pub mod cross_vault {
     /// Only the destination domain is passed; the recipient comes from the CctpRoute registered by admin
     pub fn rebalance_cctp(ctx: Context<RebalanceCctp>, amount: u64, destination_domain: u32) -> Result<()> {
         instructions::rebalance_cctp::rebalance_cctp(ctx, amount, destination_domain)
+    }
+
+    /// The rebalancer deposits the amount above the pool watermark into the Relay Depository (chains CCTP does not reach, e.g. BSC).
+    /// order_id comes from a Relay quote whose user / refundTo is the Pool PDA and whose recipient is our vault on the destination chain
+    pub fn rebalance_relay(ctx: Context<RebalanceRelay>, amount: u64, order_id: [u8; 32]) -> Result<()> {
+        instructions::rebalance_relay::rebalance_relay(ctx, amount, order_id)
+    }
+
+    /// Move Relay refunds (they land in the Pool's ATA, the relay staging account) back into the vault; anyone may call
+    pub fn reclaim_relay_refund(ctx: Context<ReclaimRelayRefund>) -> Result<()> {
+        instructions::rebalance_relay::reclaim_relay_refund(ctx)
     }
 
     // ------------------------- admin: CCTP routes (one per destination chain) -------------------------

@@ -5,6 +5,7 @@ pub mod deposit;
 pub mod liquidity;
 pub mod pool;
 pub mod rebalance_cctp;
+pub mod rebalance_relay;
 
 pub use admin::*;
 pub use cctp_route::*;
@@ -13,6 +14,7 @@ pub use deposit::*;
 pub use liquidity::*;
 pub use pool::*;
 pub use rebalance_cctp::*;
+pub use rebalance_relay::*;
 
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked};

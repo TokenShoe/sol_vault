@@ -59,3 +59,12 @@ filename = "tests/fixtures/cctp/local_token.json"
 [[test.validator.account]]
 address = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
 filename = "tests/fixtures/cctp/usdc_mint.json"
+
+# Load the Relay Depository on the local test validator (dumped from MAINNET: ./scripts/dump-relay-fixtures.sh)
+[[test.genesis]]
+address = "99vQwtBwYtrqqD9YSXbdum3KBdxPAVxYTaQ3cfnJSrN2"
+program = "tests/fixtures/relay/relay_depository.so"
+
+[[test.validator.account]]
+address = "Dodg2HifwU8rmaVVyMyUZDGTRbqAJTyVYxXPwcbNpBKc"
+filename = "tests/fixtures/relay/relay_depository.json"

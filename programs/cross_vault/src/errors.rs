@@ -34,4 +34,6 @@ pub enum VaultError {
     NotPendingAdmin,
     #[msg("operator / rebalancer cannot be the zero address")]
     InvalidRole,
+    #[msg("Relay order id cannot be all zeros")]
+    InvalidOrderId,
 }

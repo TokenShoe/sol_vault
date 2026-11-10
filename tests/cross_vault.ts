@@ -2,6 +2,7 @@
  * cross_vault integration tests (multi-token: USDC pool + USDT pool)
  * Covers: initialization, pool creation, gasless deposit + events, payout + fee (pump-style two transfers in one tx),
  *      add liquidity, CCTP V2 rebalance (the local validator loads the real CCTP programs dumped from devnet),
+ *      Relay rebalance (the local validator loads the real Relay Depository dumped from mainnet) + refund reclaim + quote checks,
  *      multi-token isolation (USDT deposit/payout, pools do not affect each other), permissions, per-pool pause, config updates, two-step admin transfer
  */
 import * as anchor from "@anchor-lang/core";
@@ -9,6 +10,7 @@ import { Program } from "@anchor-lang/core";
 import { Keypair, LAMPORTS_PER_SOL, PublicKey, sendAndConfirmTransaction, Transaction } from "@solana/web3.js";
 import * as fs from "fs";
 import {
+  createAssociatedTokenAccountIdempotent,
   createMint,
   getAccount,
   getAssociatedTokenAddressSync,
@@ -49,6 +51,13 @@ import {
   setRoles,
   transferAdmin,
   vaultAddress,
+  MINTS,
+  RELAY,
+  checkRelayQuote,
+  rebalanceRelay,
+  reclaimRelayRefund,
+  relayStagingAddress,
+  relayVaultTokenAddress,
 } from "../client/vault-client";
 
 const U = (n: number) => BigInt(Math.round(n * 1_000_000)); // USDC / USDT both have 6 decimals
@@ -369,6 +378,96 @@ describe("cross_vault", () => {
     expect(BigInt("0x" + body.subarray(132, 164).toString("hex"))).to.eq(0n); // max_fee = 0
   });
 
+  // ------------------------------ USDT: Relay rebalance (chains CCTP does not reach, e.g. BSC) ------------------------------
+  const relayOrderId = () => Array.from(Keypair.generate().publicKey.toBytes()); // any 32 random bytes
+  const tokenBalance = async (a: PublicKey) => BigInt((await conn.getTokenAccountBalance(a)).value.amount);
+
+  it("Relay rebalance: only the rebalancer, only above the watermark, non-zero order id; fails while Relay has no token account", async () => {
+    const { excess } = await getPoolStatus(program, usdt);
+    await expectFail(rebalanceRelay(program, operator, usdt, 1n, relayOrderId()), "Unauthorized");
+    await expectFail(rebalanceRelay(program, rebalancer, usdt, excess + 1n, relayOrderId()), "BelowWatermark");
+    await expectFail(rebalanceRelay(program, rebalancer, usdt, 0n, relayOrderId()), "InvalidAmount");
+    await expectFail(rebalanceRelay(program, rebalancer, usdt, 1n, new Array(32).fill(0)), "InvalidOrderId");
+    // Relay has no USDT account yet: Relay would create it paid by the sender (the Pool PDA), which cannot pay -> the whole tx fails
+    await expectFail(rebalanceRelay(program, rebalancer, usdt, 1n, relayOrderId()), "Error");
+    expect((await getPoolStatus(program, usdt)).excess).to.eq(excess); // funds untouched
+  });
+
+  it("Relay rebalance: real Relay deposit_token CPI moves the excess into the Relay vault, tagged with the order id", async () => {
+    // on mainnet Relay's USDC / USDT accounts already exist; create the local one here
+    const relayAta = await createAssociatedTokenAccountIdempotent(conn, admin, usdt, RELAY.VAULT, { commitment: "confirmed" }, TOKEN_PROGRAM_ID, undefined, true);
+    expect(relayAta.toBase58()).to.eq(relayVaultTokenAddress(usdt).toBase58());
+
+    const { excess, watermark } = await getPoolStatus(program, usdt);
+    const id = relayOrderId();
+    const signature = await rebalanceRelay(program, rebalancer, usdt, excess, id);
+
+    expect((await getPoolStatus(program, usdt)).balance).to.eq(watermark); // vault keeps exactly the watermark
+    expect(await tokenBalance(relayAta)).to.eq(excess); // all of it is now in the Relay vault
+    expect(await tokenBalance(relayStagingAddress(usdt))).to.eq(0n); // staging passed it straight through
+
+    // our event
+    const ev = (await parseEventsFromTx(program, signature)).find((e) => e.name.toLowerCase() === "rebalancerelayevent")!;
+    expect(ev.data.mint.toBase58()).to.eq(usdt.toBase58());
+    expect(ev.data.amount.toString()).to.eq(excess.toString());
+    expect(Array.from(ev.data.orderId as number[])).to.deep.eq(id);
+
+    // Relay's own DepositEvent (emit! -> "Program data:" log): depositor = USDT Pool PDA, id = our order id
+    const tx = await conn.getTransaction(signature, { commitment: "confirmed", maxSupportedTransactionVersion: 0 });
+    const datas = tx!.meta!.logMessages!.filter((l) => l.startsWith("Program data: ")).map((l) => Buffer.from(l.slice(14), "base64"));
+    // DepositEvent: 8 discriminator + depositor(32) + Option<token>(1 + 32) + amount(8) + id(32)
+    const dep = datas.find((d) => d.length === 8 + 32 + 33 + 8 + 32)!;
+    expect(new PublicKey(dep.subarray(8, 40)).toBase58()).to.eq(poolPda(usdt).toBase58());
+    expect(new PublicKey(dep.subarray(41, 73)).toBase58()).to.eq(usdt.toBase58());
+    expect(dep.readBigUInt64LE(73)).to.eq(excess);
+    expect(Array.from(dep.subarray(81, 113))).to.deep.eq(id);
+  });
+
+  it("Relay refund: lands in the relay staging account; anyone can move it back into the vault", async () => {
+    const staging = relayStagingAddress(usdt);
+    // simulate Relay execute_transfer refunding to refundTo = Pool PDA (it pays ATA(mint, Pool) = the staging account)
+    await mintTo(conn, admin, usdt, staging, admin, U(7), [], { commitment: "confirmed" });
+    const before = (await getPoolStatus(program, usdt)).balance;
+    expect((await getPoolStatus(program, usdt)).relayStagingBalance).to.eq(U(7));
+
+    const signature = await reclaimRelayRefund(program, feePayer, usdt); // a random wallet, not a role
+    expect((await getPoolStatus(program, usdt)).balance).to.eq(before + U(7));
+    expect(await tokenBalance(staging)).to.eq(0n);
+    const ev = (await parseEventsFromTx(program, signature)).find((e) => e.name.toLowerCase() === "relayrefundreclaimedevent")!;
+    expect(ev.data.amount.toString()).to.eq(U(7).toString());
+
+    await expectFail(reclaimRelayRefund(program, feePayer, usdt), "InvalidAmount"); // nothing left
+  });
+
+  it("Relay quote check: a real quote passes; wrong recipient / refund / amount / extra calls are rejected", () => {
+    const quote = JSON.parse(fs.readFileSync("tests/fixtures/relay/quote_usdc_to_bsc_usdt.json", "utf8"));
+    const req = {
+      mint: MINTS.USDC_MAINNET,
+      amount: 100_000_000n,
+      destinationChainId: CHAIN.BSC,
+      destinationCurrency: "0x55d398326f99059ff775485246999027b3197955",
+      recipient: BSC_USER,
+    };
+    const ok = checkRelayQuote(quote, req);
+    expect("0x" + Buffer.from(ok.orderId).toString("hex")).to.eq(quote.protocol.v2.orderId);
+    expect(ok.amount).to.eq(100_000_000n);
+
+    const tamper = (f: (q: any) => void) => {
+      const q = JSON.parse(JSON.stringify(quote));
+      f(q);
+      return q;
+    };
+    const bad = (q: any, r: any, msg: string) => expect(() => checkRelayQuote(q, r)).to.throw(msg);
+    bad(quote, { ...req, recipient: "0x000000000000000000000000000000000000dead" }, "order pays");
+    bad(quote, { ...req, amount: 1n }, "instruction amount");
+    bad(quote, { ...req, minAmountOut: 10n ** 30n }, "minimum output");
+    bad(tamper((q) => (q.protocol.v2.orderData.output.payments[0].recipient = "0x000000000000000000000000000000000000dead")), req, "order pays");
+    bad(tamper((q) => (q.protocol.v2.orderData.inputs[0].refunds[0].recipient = admin.publicKey.toBase58())), req, "refund on solana");
+    bad(tamper((q) => q.protocol.v2.orderData.output.calls.push({ to: "0x00" })), req, "destination calls");
+    bad(tamper((q) => (q.protocol.v2.orderId = "0x" + "11".repeat(32))), req, "orderId");
+    bad(tamper((q) => (q.steps[0].items[0].data.instructions[0].keys[1].pubkey = admin.publicKey.toBase58())), req, "account #1");
+  });
+
   // ------------------------------ V2 encrypted deposit ------------------------------
   it("V2: encrypted destination params; only ciphertext on chain, backend can decrypt", async () => {
     const platformKey = generateEncryptionKeyPair(); // secretKey stays on the backend
@@ -400,7 +499,7 @@ describe("cross_vault", () => {
   });
 
   // ------------------------------ pause / config / admin ------------------------------
-  it("per-pool pause: pausing USDC deposits does not affect USDT; pausing USDC withdrawals blocks payouts and CCTP", async () => {
+  it("per-pool pause: pausing USDC deposits does not affect USDT; pausing USDC withdrawals blocks payouts, CCTP and Relay", async () => {
     const depositTx = (mint: PublicKey) =>
       buildDepositV2Tx(program, { ...depositBase(mint), amount: U(1), fee: 0, encryptedParams: Buffer.from([1, 2, 3]) });
 
@@ -414,6 +513,7 @@ describe("cross_vault", () => {
     await setPauseFlags(program, admin, usdc, false, true);
     await expectFail(payoutToUser(program, operator, usdc, seller.publicKey, orderId.random(), U(1)), "WithdrawPaused");
     await expectFail(rebalanceCctp(program, rebalancer, usdc, 1n, CCTP.DOMAIN.ETHEREUM), "WithdrawPaused");
+    await expectFail(rebalanceRelay(program, rebalancer, usdc, 1n, relayOrderId()), "WithdrawPaused");
     await sendAndConfirmTransaction(conn, await depositTx(usdc), [feePayer, user], { commitment: "confirmed" });
     await payoutToUser(program, operator, usdt, seller.publicKey, orderId.random(), U(1));
 

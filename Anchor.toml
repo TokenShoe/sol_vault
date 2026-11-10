@@ -1,0 +1,61 @@
+[toolchain]
+anchor_version = "1.2.2"
+solana_version = "4.1.2"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+cross_vault = "A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK"
+
+[programs.devnet]
+cross_vault = "A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK"
+
+[programs.mainnet]
+cross_vault = "A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+# Deploy as upgradeable on the test validator, upgrade authority = test wallet (checked by initialize)
+[test]
+upgradeable = true
+
+# Load CCTP V2 on the local test validator (dumped from devnet: ./scripts/dump-cctp-fixtures.sh)
+[[test.genesis]]
+address = "CCTPV2vPZJS2u2BBsUoscuikbYjnpFmbFsvVuJdgUMQe"
+program = "tests/fixtures/cctp/token_messenger_minter_v2.so"
+
+[[test.genesis]]
+address = "CCTPV2Sm4AdWt5296sk4P66VBZ7bEhcARwFaaS9YPbeC"
+program = "tests/fixtures/cctp/message_transmitter_v2.so"
+
+[[test.validator.account]]
+address = "W1k5ijkaSTo5iA5zChNpfzcy796fLhkBxfmJuR8W8HU"
+filename = "tests/fixtures/cctp/message_transmitter.json"
+
+[[test.validator.account]]
+address = "AawthJCGRmggpfv9MMWV6Jmo9cue4gL9wUZgRBShg58W"
+filename = "tests/fixtures/cctp/token_messenger.json"
+
+[[test.validator.account]]
+address = "E1bQJ8eMMn3zmeSewW3HQ8zmJr7KR75JonbwAtWx2bux"
+filename = "tests/fixtures/cctp/token_minter.json"
+
+[[test.validator.account]]
+address = "3EzN2mcmdfSNGXRCAixSpTteK6ywdmFDZZWvkMnznFt9"
+filename = "tests/fixtures/cctp/remote_token_messenger_0.json"
+
+[[test.validator.account]]
+address = "7MwmWTK2R9Na6rnoSAEt5gytFmSZj9WLVdazvxvru9AU"
+filename = "tests/fixtures/cctp/local_token.json"
+
+# Circle devnet USDC (mint authority replaced with tests/fixtures/usdc-mint-authority.json, local only)
+[[test.validator.account]]
+address = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"
+filename = "tests/fixtures/cctp/usdc_mint.json"

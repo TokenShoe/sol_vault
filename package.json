@@ -1,0 +1,28 @@
+{
+  "name": "cross-vault",
+  "private": true,
+  "scripts": {
+    "lint": "prettier */*.ts --check",
+    "cli": "ts-node --transpile-only -P tsconfig.json scripts/cli.ts"
+  },
+  "dependencies": {
+    "@anchor-lang/core": "^1.2.2",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0",
+    "bs58": "^6.0.0",
+    "ethers": "^6",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/chai": "^4.3.20",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22",
+    "chai": "^4.5.0",
+    "mocha": "^10.8.2",
+    "ts-mocha": "^10.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3",
+    "undici": "^7"
+  }
+}

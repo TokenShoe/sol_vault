@@ -1,0 +1,7 @@
+{
+  // Turn off rust-analyzer's "code is inactive due to #[cfg]" hint:
+  // Anchor macros generate extra code behind features that are off by default (cpi / anchor-debug ...),
+  // and the hint lands on our own functions, which is misleading.
+  // Newer rust-analyzer calls it inactive_code, older versions inactive-code; list both.
+  "rust-analyzer.diagnostics.disabled": ["inactive_code", "inactive-code"]
+}

@@ -11,7 +11,7 @@
 //!   - destination_domain: CCTP destination domain (Ethereum/Sepolia = 0, Base = 6 ...)
 //! The recipient is NOT passed by the backend: it is read from the CctpRoute registered by admin via set_cctp_route (our own vault contract on the destination chain).
 //!
-//! Constraints: only the rebalancer; the destination domain must have a registered route; vault balance after transfer >= pool watermark; pool withdrawals not paused.
+//! Constraints: only the rebalancer or admin; the destination domain must have a registered route; vault balance after transfer >= pool watermark; pool withdrawals not paused.
 //! CCTP only supports Circle USDC: calls on USDT or other pools are rejected by CCTP (no matching local_token).
 //! CCTP validates all of its own accounts (PDAs, supported domain, supported mint); wrong accounts are rejected by CCTP.
 //!
@@ -47,7 +47,13 @@ pub struct RebalanceCctp<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = rebalancer @ VaultError::Unauthorized)]
+    /// rebalancer or admin may call
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = rebalancer.key() == config.rebalancer
+            || rebalancer.key() == config.admin @ VaultError::Unauthorized
+    )]
     pub config: Account<'info, Config>,
 
     /// USDC mint (must be writable for CCTP to burn)

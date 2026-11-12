@@ -148,6 +148,19 @@ const fmt = (units: bigint | number | BN) => {
 };
 const bn = (v: bigint) => new BN(v.toString());
 
+/** SOL amount string -> lamports, exact (no floating point), at most 9 decimals */
+const solToLamports = (v: string): bigint => {
+  if (!/^\d*\.?\d+$/.test(v)) throw new Error(`invalid SOL amount: ${v}`);
+  const [i, f = ""] = v.split(".");
+  if (f.length > 9) throw new Error(`SOL amount has more than 9 decimals: ${v}`);
+  return BigInt(i || "0") * 1_000_000_000n + BigInt((f + "000000000").slice(0, 9));
+};
+/** lamports -> SOL string, trailing zeros trimmed */
+const lamportsToSol = (l: bigint): string => {
+  const s = l.toString().padStart(10, "0");
+  return `${s.slice(0, -9)}.${s.slice(-9)}`.replace(/\.?0+$/, "") || "0";
+};
+
 // ------------------------------ keys ------------------------------
 const ROLES = ["admin", "operator", "rebalancer", "feepayer", "fee-wallet", "user", "user2"] as const;
 type Role = (typeof ROLES)[number];
@@ -318,6 +331,36 @@ const commands: Record<string, { desc: string; run: (a: Record<string, string>) 
         SystemProgram.transfer({ fromPubkey: admin.publicKey, toPubkey: loadKp(r).publicKey, lamports })
       );
       await send(ixs, [admin]);
+    },
+  },
+
+  "send-sol": {
+    desc: "admin sends SOL to any address: --to <address | role | keypair file> --sol 0.5 [--from admin]",
+    run: async (a) => {
+      const from = loadKp(a.from ?? "admin");
+      const to = resolvePubkey(need(a, "to"));
+      const lamports = solToLamports(need(a, "sol"));
+      if (lamports <= 0n) throw new Error("--sol must be greater than 0");
+      if (to.equals(from.publicKey)) throw new Error("--to is the same as the sender");
+
+      // Pre-checks so the user gets a readable error instead of a raw simulation failure
+      const FEE_RESERVE = 10_000n; // enough for one transaction fee (5000 lamports per signature)
+      const fromBal = BigInt(await connection.getBalance(from.publicKey));
+      if (fromBal < lamports + FEE_RESERVE) {
+        throw new Error(`insufficient SOL: sender has ${lamportsToSol(fromBal)} SOL, needs ${lamportsToSol(lamports + FEE_RESERVE)} (amount + fee)`);
+      }
+      // A brand-new (0 SOL) account must receive at least the rent-exempt minimum, otherwise the transfer fails
+      const toBal = BigInt(await connection.getBalance(to));
+      const rentMin = BigInt(await connection.getMinimumBalanceForRentExemption(0));
+      if (toBal === 0n && lamports < rentMin) {
+        throw new Error(`recipient is a new account: send at least ${lamportsToSol(rentMin)} SOL (rent-exempt minimum)`);
+      }
+
+      log(`RPC: ${RPC_URL}`);
+      log(`  ${from.publicKey.toBase58()} -> ${to.toBase58()}  ${lamportsToSol(lamports)} SOL`);
+      await send([SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports })], [from]);
+      log(`  sender balance ${lamportsToSol(BigInt(await connection.getBalance(from.publicKey)))} SOL`);
+      log(`  recipient balance ${lamportsToSol(BigInt(await connection.getBalance(to)))} SOL`);
     },
   },
 

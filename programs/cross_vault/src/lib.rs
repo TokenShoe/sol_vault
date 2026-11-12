@@ -2,8 +2,8 @@
 //!
 //! Roles:
 //! - admin: create pools (add tokens), update roles and pool params, pause deposits/withdrawals per pool, two-step admin transfer, register CCTP destination vaults
-//! - operator: after a user sells a meme on another chain, pays the user (+ fee) from the pool chosen by the backend
-//! - rebalancer: bridges the funds above the pool watermark to vaults on other chains
+//! - operator: after a user sells a meme on another chain, pays the user (+ fee) from the pool chosen by the backend (admin may also call debit)
+//! - rebalancer: bridges the funds above the pool watermark to vaults on other chains (admin may also call rebalance_cctp / rebalance_relay)
 //!   - via CCTP (recipient addresses are registered per domain by admin via set_cctp_route; the rebalancer can only pick a domain)
 //!   - via Relay for chains CCTP does not reach, e.g. BSC (funds can only go into the Relay Depository)
 //!

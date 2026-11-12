@@ -15,7 +15,7 @@
 //! be the associated token account (ATA) of the sender / refundTo. Our vault is PDA ["vault", pool], not an ATA, so the
 //! Pool's own ATA, ATA(mint, Pool PDA), is used for both directions. Only this program (the Pool PDA) can move funds out of it.
 //!
-//! Constraints: only the rebalancer; pool withdrawals not paused; vault balance after transfer >= pool watermark.
+//! Constraints: only the rebalancer or admin; pool withdrawals not paused; vault balance after transfer >= pool watermark.
 //! The Relay program and its depository / vault accounts are fixed constants, so funds can only go into the Relay Depository.
 //! Limitation: the destination recipient is bound inside Relay's off-chain order (order_id is only its hash), so it cannot be
 //! verified on chain; the backend must check the quote, and a monitor should check each event against the Relay API.
@@ -50,7 +50,13 @@ pub struct RebalanceRelay<'info> {
     #[account(mut)]
     pub rebalancer: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = rebalancer @ VaultError::Unauthorized)]
+    /// rebalancer or admin may call
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = rebalancer.key() == config.rebalancer
+            || rebalancer.key() == config.admin @ VaultError::Unauthorized
+    )]
     pub config: Account<'info, Config>,
 
     pub mint: InterfaceAccount<'info, Mint>,

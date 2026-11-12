@@ -256,6 +256,14 @@ describe("cross_vault", () => {
     await expectFail(payoutToUser(program, rebalancer, usdc, rebalancer.publicKey, orderId.random(), U(1)), "Unauthorized");
   });
 
+  it("admin can also pay out (debit allows operator or admin)", async () => {
+    const before = (await getPoolStatus(program, usdc)).balance;
+    const sig = await payoutToUser(program, admin, usdc, seller.publicKey, orderId.random(), U(1));
+    expect((await getPoolStatus(program, usdc)).balance).to.eq(before - U(1));
+    const ev = (await parseEventsFromTx(program, sig)).find((e) => e.name.toLowerCase() === "debitevent")!;
+    expect(ev.data.operator.toBase58()).to.eq(admin.publicKey.toBase58());
+  });
+
   // ------------------------------ USDT pool: multi-token ------------------------------
   it("USDT: user deposits USDT (V1 / V2) into the USDT vault, event mint = USDT", async () => {
     const usdcBefore = (await getPoolStatus(program, usdc)).balance;
@@ -340,6 +348,12 @@ describe("cross_vault", () => {
     // domains without a route (including Solana itself): the route account does not exist, so it fails
     await expectFail(rebalanceCctp(program, rebalancer, usdc, 1n, CCTP.SOLANA_DOMAIN), "AccountNotInitialized");
     await expectFail(rebalanceCctp(program, rebalancer, usdc, 1n, CCTP.DOMAIN.BASE), "AccountNotInitialized");
+  });
+
+  it("CCTP rebalance: admin can also call it", async () => {
+    const before = (await getPoolStatus(program, usdc)).balance;
+    await rebalanceCctp(program, admin, usdc, 1n, CCTP.DOMAIN.ETHEREUM);
+    expect((await getPoolStatus(program, usdc)).balance).to.eq(before - 1n);
   });
 
   it("CCTP rebalance: real CCTP V2 deposit_for_burn call burns the USDC vault and creates a message to Sepolia", async () => {
@@ -437,6 +451,13 @@ describe("cross_vault", () => {
     expect(ev.data.amount.toString()).to.eq(U(7).toString());
 
     await expectFail(reclaimRelayRefund(program, feePayer, usdt), "InvalidAmount"); // nothing left
+  });
+
+  it("Relay rebalance: admin can also call it", async () => {
+    const { excess, watermark } = await getPoolStatus(program, usdt);
+    expect(excess > 0n).to.eq(true); // the reclaimed refund above put funds over the watermark
+    await rebalanceRelay(program, admin, usdt, excess, relayOrderId());
+    expect((await getPoolStatus(program, usdt)).balance).to.eq(watermark);
   });
 
   it("Relay quote check: a real quote passes; wrong recipient / refund / amount / extra calls are rejected", () => {

@@ -160,6 +160,16 @@ yarn -s cli fund --sol 0.2
 
 admin sends 0.2 SOL each to operator, rebalancer and feepayer.
 
+To send SOL from admin to any single address:
+
+```bash
+yarn -s cli send-sol --to <address> --sol 0.5
+```
+
+- `--to`: a base58 address, a role name (`operator`, `user` ...) or a keypair file
+- `--sol`: amount in SOL (up to 9 decimals); a brand-new address must receive at least the rent-exempt minimum (the command checks first and prints the exact amount)
+- `--from`: optional sender role / keypair file, default `admin`
+
 ### 4.2 Prepare USDC (pick one)
 
 > ⚠️ Pick **before** creating the USDC pool in 4.3: the pool is bound to the mint chosen here.

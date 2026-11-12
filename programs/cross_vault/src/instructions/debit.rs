@@ -1,4 +1,4 @@
-//! operator transfers out of a pool (mirrors pump AdminDebit: the pool is selected by mint / pool / vault)
+//! operator (or admin) transfers out of a pool (mirrors pump AdminDebit: the pool is selected by mint / pool / vault)
 //!
 //! Generic transfer to any token account of the same mint (except the vault itself). After a user sells a meme, the backend decides which token to pay with
 //! and puts several debits in the **same transaction**:
@@ -22,7 +22,13 @@ use crate::{
 pub struct Debit<'info> {
     pub operator: Signer<'info>,
 
-    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = operator @ VaultError::Unauthorized)]
+    /// operator or admin may call
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = operator.key() == config.operator
+            || operator.key() == config.admin @ VaultError::Unauthorized
+    )]
     pub config: Account<'info, Config>,
 
     pub mint: InterfaceAccount<'info, Mint>,

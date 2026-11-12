@@ -1,0 +1,152 @@
+{
+  "_readme": "Non-secret CLI config, one section per network; the active one is NETWORK in .env (devnet / mainnet / localnet). Private keys and RPC URLs with API keys go in .env, never here. Guide: docs/deployment-guide.md",
+  "networks": {
+    "localnet": {
+      "rpc": "http://127.0.0.1:8899",
+      "addresses": {
+        "operator": "",
+        "rebalancer": "",
+        "fee-wallet": ""
+      },
+      "pools": {
+        "USDC": {
+          "mint": "",
+          "watermark": "5",
+          "maxDebit": "0"
+        },
+        "USDT": {
+          "mint": "",
+          "watermark": "50",
+          "maxDebit": "100"
+        }
+      },
+      "cctp": {
+        "attestationApi": "https://iris-api-sandbox.circle.com",
+        "domains": {
+          "ETHEREUM": 0,
+          "AVALANCHE": 1,
+          "OPTIMISM": 2,
+          "ARBITRUM": 3,
+          "BASE": 6,
+          "POLYGON": 7
+        },
+        "routes": {},
+        "evmTestnet": null
+      },
+      "relay": {
+        "api": "https://api.relay.link",
+        "chains": {
+          "BSC": 56,
+          "ETHEREUM": 1,
+          "BASE": 8453
+        },
+        "defaultChain": "BSC",
+        "defaultRecipient": "",
+        "defaultTokens": {
+          "BSC": "0x55d398326f99059ff775485246999027b3197955"
+        }
+      }
+    },
+    "devnet": {
+      "rpc": "https://api.devnet.solana.com",
+      "addresses": {
+        "operator": "",
+        "rebalancer": "",
+        "fee-wallet": ""
+      },
+      "pools": {
+        "USDC": {
+          "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+          "watermark": "1",
+          "maxDebit": "0"
+        },
+        "USDT": {
+          "mint": "",
+          "watermark": "50",
+          "maxDebit": "100"
+        }
+      },
+      "cctp": {
+        "attestationApi": "https://iris-api-sandbox.circle.com",
+        "domains": {
+          "ETHEREUM": 0,
+          "AVALANCHE": 1,
+          "OPTIMISM": 2,
+          "ARBITRUM": 3,
+          "BASE": 6,
+          "POLYGON": 7
+        },
+        "routes": {
+          "ETHEREUM": "0x72281a602539d2E31a1129DeE7d26C4960c8F787"
+        },
+        "evmTestnet": {
+          "name": "Ethereum Sepolia",
+          "chainId": 11155111,
+          "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
+          "messageTransmitter": "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
+          "usdc": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+          "explorer": "https://sepolia.etherscan.io"
+        }
+      },
+      "relay": {
+        "api": "https://api.relay.link",
+        "chains": {
+          "BSC": 56,
+          "ETHEREUM": 1,
+          "BASE": 8453
+        },
+        "defaultChain": "BSC",
+        "defaultRecipient": "",
+        "defaultTokens": {
+          "BSC": "0x55d398326f99059ff775485246999027b3197955"
+        }
+      }
+    },
+    "mainnet": {
+      "rpc": "https://api.mainnet-beta.solana.com",
+      "addresses": {
+        "operator": "",
+        "rebalancer": "",
+        "fee-wallet": ""
+      },
+      "pools": {
+        "USDC": {
+          "mint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+          "watermark": "",
+          "maxDebit": ""
+        },
+        "USDT": {
+          "mint": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+          "watermark": "",
+          "maxDebit": ""
+        }
+      },
+      "cctp": {
+        "attestationApi": "https://iris-api.circle.com",
+        "domains": {
+          "ETHEREUM": 0,
+          "AVALANCHE": 1,
+          "OPTIMISM": 2,
+          "ARBITRUM": 3,
+          "BASE": 6,
+          "POLYGON": 7
+        },
+        "routes": {},
+        "evmTestnet": null
+      },
+      "relay": {
+        "api": "https://api.relay.link",
+        "chains": {
+          "BSC": 56,
+          "ETHEREUM": 1,
+          "BASE": 8453
+        },
+        "defaultChain": "BSC",
+        "defaultRecipient": "",
+        "defaultTokens": {
+          "BSC": "0x55d398326f99059ff775485246999027b3197955"
+        }
+      }
+    }
+  }
+}

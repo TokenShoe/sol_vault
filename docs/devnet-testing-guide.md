@@ -34,11 +34,12 @@ All program operations use the bundled CLI `yarn -s cli <command>` (source: `scr
 yarn -s cli help   # list all commands
 ```
 
-- Connects to devnet by default (`https://api.devnet.solana.com`); override with the `RPC_URL` environment variable
-- **Use a free dedicated RPC**: the public devnet node is heavily rate limited (`429 Too Many Requests`), and deploying sends hundreds of transactions, so it often fails. Sign up for free at https://dashboard.helius.dev, copy the Devnet RPC URL, then:
+- Reads two files at the project root ([deployment-guide.md](deployment-guide.md) explains every field):
+  - `.env`: **secrets** (private keys, `NETWORK`, `DEVNET_RPC_URL` / `MAINNET_RPC_URL`), git-ignored. Start with `cp .env.example .env`; the network is devnet unless a command gets `--network mainnet`
+  - `config.json`: **settings** per network (pools, CCTP domains / routes, Relay, Sepolia); this guide uses `networks.devnet`
+- **Use a free dedicated RPC**: the public devnet node is heavily rate limited (`429 Too Many Requests`), and deploying sends hundreds of transactions, so it often fails. Sign up for free at https://dashboard.helius.dev, copy the Devnet RPC URL, and put it in `.env`:
   ```bash
-  export RPC_URL='https://devnet.helius-rpc.com/?api-key=YOUR_KEY'   # used by the CLI
-  # for solana commands pass -u "$RPC_URL", e.g. deploy: solana program deploy ... -u "$RPC_URL" --use-rpc
+  DEVNET_RPC_URL=https://devnet.helius-rpc.com/?api-key=YOUR_KEY
   ```
   Measured: deploying via the public node failed several times; via Helius it took 14 seconds.
 - Uses the system proxy automatically (`https_proxy` environment variable)
@@ -50,32 +51,31 @@ yarn -s cli help   # list all commands
 ## 1. Create test accounts
 
 ```bash
+cp .env.example .env     # once (keygen also creates it if missing)
 yarn -s cli keygen
 ```
 
-This creates the following keys in `keys/devnet/` (the directory is in `.gitignore` and never committed):
+This fills every **empty** key in `.env` with a new wallet (existing keys are never overwritten) and prints the addresses:
 
-| File | Role | Purpose | Needs SOL? |
+| `.env` variable | Role | Purpose | Needs SOL? |
 |---|---|---|---|
-| `admin.json` | admin + deployer | deploys the program (becomes upgrade authority), initializes, updates config, pauses; also the issuer of self-issued test tokens | ✅ ~5 SOL |
-| `operator.json` | operator | pays users (debit) | ✅ 0.2 SOL (sent by admin) |
-| `rebalancer.json` | rebalancer | rebalance, add liquidity | ✅ 0.2 SOL (sent by admin) |
-| `feepayer.json` | platform gas sponsor | pays gas for users' deposit transactions | ✅ 0.2 SOL (sent by admin) |
-| `fee-wallet.json` | platform fee wallet | receives the fee on payouts | ❌ |
-| `user.json` | test user 1 | deposits (**0 SOL, signs only**, verifies gas sponsoring) | ❌ |
-| `user2.json` | test user 2 | receives payouts (no USDC account, verifies automatic creation) | ❌ |
-| `encryption.json` | V2 encryption key | encrypts/decrypts the destination params of V2 deposits | — |
-| `evm.json` | Sepolia test wallet | the destination vault for CCTP rebalancing, and submits `receiveMessage` on Sepolia | a little **Sepolia ETH** |
+| `ADMIN_PRIVATE_KEY` | admin + deployer | deploys the program (becomes upgrade authority), initializes, updates config, pauses; also the issuer of self-issued test tokens | ✅ ~7 SOL |
+| `OPERATOR_PRIVATE_KEY` | operator | pays users (debit) | ✅ 0.2 SOL (sent by admin) |
+| `REBALANCER_PRIVATE_KEY` | rebalancer | rebalance, add liquidity | ✅ 0.2 SOL (sent by admin) |
+| `FEEPAYER_PRIVATE_KEY` | platform gas sponsor | pays gas for users' deposit transactions | ✅ 0.2 SOL (sent by admin) |
+| `FEE_WALLET_PRIVATE_KEY` | platform fee wallet | receives the fee on payouts | ❌ |
+| `USER_PRIVATE_KEY` | test user 1 | deposits (**0 SOL, signs only**, verifies gas sponsoring) | ❌ |
+| `USER2_PRIVATE_KEY` | test user 2 | receives payouts (no USDC account, verifies automatic creation) | ❌ |
+| `ENCRYPTION_SECRET_KEY` | V2 encryption key | encrypts/decrypts the destination params of V2 deposits | — |
+| `EVM_PRIVATE_KEY` | Sepolia test wallet | the destination vault for CCTP rebalancing, and submits `receiveMessage` on Sepolia | a little **Sepolia ETH** |
 
-The Sepolia wallet is generated separately:
+To use your own wallet for a role (e.g. admin from Phantom), paste its base58 private key into `.env` **before** running `keygen`; only empty lines get new wallets. If you still have an old `keys/devnet` directory, run `yarn -s cli import-keys --dir keys/devnet` instead.
 
-```bash
-yarn -s cli evm-keygen      # creates keys/devnet/evm.json and prints the Sepolia address
-```
+Fund the Sepolia address printed for `evm` with some Sepolia ETH (0.05 is enough for the `receiveMessage` gas), e.g. Google's faucet https://cloud.google.com/application/web3/faucet/ethereum/sepolia .
 
-Then fund that address with some Sepolia ETH (0.05 is enough for the `receiveMessage` gas), e.g. Google's faucet https://cloud.google.com/application/web3/faucet/ethereum/sepolia .
+> `.env` is the **only** copy of these wallets: back it up, never commit it.
 
-The command prints every role's address; the next step needs the admin address. You can always list all addresses and balances with:
+You can always list all addresses and balances with:
 
 ```bash
 yarn -s cli balances
@@ -87,12 +87,12 @@ Newly generated wallets have a 0 balance on chain; fund them in the next step.
 
 ## 2. Get devnet SOL
 
-Prepare about **5 SOL** for **admin**:
+Prepare about **7 SOL** for **admin** (`yarn -s cli env-check` prints the exact deploy cost):
 
 | Purpose | Amount |
 |---|---|
-| program data account rent (~431KB) | ~2.2 SOL (reclaimable after testing) |
-| temporary buffer account during deploy | ~2.2 SOL (refunded once the deploy succeeds) |
+| program data account rent (~482KB) | ~3.4 SOL (reclaimable after testing) |
+| temporary buffer account during deploy | ~3.4 SOL (refunded once the deploy succeeds) |
 | sent to operator / rebalancer / feepayer | 0.6 SOL |
 | tx fees and small account rents | < 0.05 SOL |
 
@@ -104,8 +104,6 @@ Open https://faucet.solana.com, choose **Devnet**, enter the admin address and r
 
 ```bash
 yarn -s cli airdrop --to admin --sol 2
-# or with the solana CLI:
-solana airdrop 2 $(solana address -k keys/devnet/admin.json) -u devnet
 ```
 
 The devnet faucet is rate limited; on `rate limit` wait a while or use the web faucet.
@@ -113,7 +111,7 @@ The devnet faucet is rate limited; on `rate limit` wait a while or use the web f
 **Check the balance:**
 
 ```bash
-solana balance -k keys/devnet/admin.json -u devnet
+yarn -s cli balances       # or: yarn -s cli env-check (also shows how much SOL the deploy needs)
 ```
 
 ---
@@ -123,30 +121,27 @@ solana balance -k keys/devnet/admin.json -u devnet
 Deploy with the admin wallet, so admin becomes the program's upgrade authority (only it can initialize):
 
 ```bash
-solana program deploy target/deploy/cross_vault.so \
-  --program-id target/deploy/cross_vault-keypair.json \
-  -k keys/devnet/admin.json \
-  -u "$RPC_URL" \
-  --use-rpc
+yarn -s cli env-check      # network ✔, admin balance, "deployed no"
+yarn -s cli deploy
 ```
 
-> `--use-rpc`: send every transaction through plain HTTP RPC. Without it the CLI connects to validators over WebSocket; behind a proxy the WebSocket does not use the proxy and fails with `Should return a valid tpu client: PubsubError(ConnectionError(... Connection reset by peer))`.
+`deploy` runs `solana program deploy ... --use-rpc` with `ADMIN_PRIVATE_KEY` (written to a temporary file that is deleted right after). `--use-rpc` sends every transaction through plain HTTP RPC: without it the solana CLI connects to validators over WebSocket, which fails behind a proxy with `Should return a valid tpu client: PubsubError(ConnectionError(... Connection reset by peer))`.
 
-The deploy sends hundreds of small transactions; with a dedicated RPC it takes well under a minute. On success it prints `Program Id: A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK`.
+The deploy sends hundreds of small transactions; with a dedicated RPC it takes well under a minute. On success it prints `Program Id: A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK` and the upgrade authority (= admin).
 
 **Check the result:**
 
 ```bash
-solana program show A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK -u "$RPC_URL"
+solana program show A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK -u devnet   # or your RPC URL
 ```
 
 Confirm two things:
 - `Authority` is the admin address
 - `Balance` is the program data rent (~2 SOL)
 
-> Use `solana program deploy`, not `anchor deploy`: the latter also uploads the IDL on chain, costing extra rent we don't need for testing.
+> `yarn -s cli deploy` uses `solana program deploy`, not `anchor deploy`: the latter also uploads the IDL on chain, costing extra rent we don't need for testing.
 >
-> If the deploy fails midway, it leaves a buffer account holding ~2 SOL; see section 7 to reclaim it, then run the command again.
+> If the deploy fails midway, it leaves a buffer account holding ~2 SOL: `yarn -s cli deploy --close-buffers` reclaims it, then run `yarn -s cli deploy` again.
 
 ---
 
@@ -166,9 +161,9 @@ To send SOL from admin to any single address:
 yarn -s cli send-sol --to <address> --sol 0.5
 ```
 
-- `--to`: a base58 address, a role name (`operator`, `user` ...) or a keypair file
+- `--to`: a base58 address or a role name (`operator`, `user` ...)
 - `--sol`: amount in SOL (up to 9 decimals); a brand-new address must receive at least the rent-exempt minimum (the command checks first and prints the exact amount)
-- `--from`: optional sender role / keypair file, default `admin`
+- `--from`: optional sender role, default `admin`
 
 ### 4.2 Prepare USDC (pick one)
 
@@ -186,7 +181,7 @@ The Circle devnet USDC mint is `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`, 6
 yarn -s cli use-usdc --mint circle
 ```
 
-- Checks that the mint exists on devnet and has 6 decimals, then writes `keys/devnet/usdc-mint.txt`
+- Checks that the mint exists on devnet and has 6 decimals, then writes it to `config.json` `networks.devnet.pools.USDC.mint` (already the Circle mint by default)
 - Creates USDC accounts for user, rebalancer, operator and fee-wallet (rent paid by admin). Later payouts include a `CreateIdempotent` for the fee wallet, which does nothing because the account already exists
 - Prints the user and rebalancer addresses for the faucet
 
@@ -216,7 +211,7 @@ user has no SOL; when sending from user the feepayer pays the gas automatically.
 yarn -s cli create-usdc --amount 1000
 ```
 
-- Creates a 6-decimal test token used as USDC, admin is the issuer, the mint is saved to `keys/devnet/usdc-mint.txt`
+- Creates a 6-decimal test token used as USDC, admin is the issuer, the mint is saved to `config.json` `networks.devnet.pools.USDC.mint` (replacing the Circle mint; put it back to use option A again)
 - Mints 1000 each to user and rebalancer
 - Creates USDC accounts for operator and fee-wallet
 
@@ -230,18 +225,27 @@ There is no official USDT on devnet; issue a 6-decimal test token to simulate it
 yarn -s cli create-token --symbol usdt --amount 1000
 ```
 
-The mint is saved to `keys/devnet/usdt-mint.txt`; select it with `--mint usdt`.
+The mint is saved to `config.json` `networks.devnet.pools.USDT.mint`; select it with `--mint usdt`.
 
 ### 4.3 Initialize the program + create token pools
 
+One command, driven by `config.json` `networks.devnet` (pools: USDC watermark 5, USDT watermark 50 with per-tx limit 100; routes: none yet):
+
 ```bash
-yarn -s cli init                                              # creates only the global Config (roles)
-yarn -s cli create-pool --mint usdc --watermark 5             # USDC pool (with option B you can use 100)
-yarn -s cli create-pool --mint usdt --watermark 50 --max-debit 100   # USDT pool, per-tx payout limit 100
+yarn -s cli setup --dry-run   # preview
+yarn -s cli setup             # initialize (roles from .env) + create_pool for every token with a mint
 ```
 
-- Only admin (the upgrade authority) can run `init`; operator and rebalancer are set to the matching accounts in `keys/devnet`. Running `init` again just prints the status (Config can only be created once)
-- Run `create-pool` once per token to create its pool and vault. The watermark and per-tx limit (0 = unlimited) are per pool. Running it again for the same token fails with `already in use`, which is expected
+- Only admin (the upgrade authority) can initialize; operator and rebalancer are the wallets in `.env` (or `addresses` in `config.json`)
+- `setup` only sends what differs from `config.json`, so running it again is safe. Change a watermark in `config.json` and run it again to update the pool
+
+The same steps one at a time (equivalent, e.g. to experiment with other values):
+
+```bash
+yarn -s cli init                                              # creates only the global Config (roles)
+yarn -s cli create-pool --mint usdc --watermark 5             # USDC pool
+yarn -s cli create-pool --mint usdt --watermark 50 --max-debit 100   # USDT pool, per-tx payout limit 100
+```
 
 The current status is printed afterwards. Check it any time with:
 
@@ -336,17 +340,18 @@ yarn -s cli pause --mint usdc --deposit false --withdraw false   # resume everyt
 
 ### 5.7 CCTP rebalance: Solana devnet -> Ethereum Sepolia (requires option A)
 
-The rebalancer bridges the vault balance above the watermark to a destination vault via Circle CCTP V2 (standard mode). For testing, the destination vault is the `evm.json` Sepolia address.
+The rebalancer bridges the vault balance above the watermark to a destination vault via Circle CCTP V2 (standard mode). For testing, the destination vault is the Sepolia address of `EVM_PRIVATE_KEY`.
 
 **⓪ admin registers the destination vault (once per chain)**
 
 The recipient is not passed by the rebalancer; it is registered in the program per domain (CctpRoute). Register Sepolia (domain 0) first:
 
 ```bash
-yarn -s cli set-route --domain 0                       # defaults to the evm.json address (testing)
-# production: yarn -s cli set-route --domain 0 --recipient 0xOurVaultContractOnEthereum
-yarn -s cli status                                     # the last section [CCTP routes] shows domain 0 -> 0x...
+yarn -s cli set-route --domain ETHEREUM                # (= --domain 0) defaults to the EVM_PRIVATE_KEY address (testing)
+yarn -s cli status                                     # the last section [CCTP routes] shows domain 0 ETHEREUM -> 0x...
 ```
+
+Permanent routes (production) go in `config.json` instead, e.g. `"cctp": { "routes": { "ETHEREUM": "0xOurVault..." } }`, applied with `yarn -s cli setup`. Domain names come from `cctp.domains`.
 
 - Update: run `set-route` again with a new address; remove: `yarn -s cli remove-route --domain 0` (the ~0.0012 SOL rent goes back to admin)
 - The first registration of a route costs admin ~0.0012 SOL rent
@@ -391,7 +396,7 @@ yarn -s cli cctp-status --tx <signature from the previous step>
 
 ```bash
 yarn -s cli cctp-receive --tx <signature> --dry-run    # optional: simulate first, no gas spent
-yarn -s cli cctp-receive --tx <signature>              # submit for real, gas paid by the evm.json wallet
+yarn -s cli cctp-receive --tx <signature>              # submit for real, gas paid by the EVM_PRIVATE_KEY wallet
 yarn -s cli evm-balance                                # ✅ Sepolia USDC increased by the bridged amount
 ```
 
@@ -424,7 +429,7 @@ yarn -s cli status                              # pending_admin = operator addre
 yarn -s cli accept-admin --key operator         # step 2: operator accepts
 yarn -s cli status                              # admin = operator address
 
-# transfer back (cleanup needs admin to be keys/devnet/admin.json)
+# transfer back (cleanup needs admin to be ADMIN_PRIVATE_KEY again)
 yarn -s cli transfer-admin --to admin --admin operator
 yarn -s cli accept-admin --key admin
 ```
@@ -450,15 +455,20 @@ yarn -s cli status                                              # balance, water
 yarn -s cli events --limit 30
 ```
 
-Lists all program events in chronological order. V2 deposits are **decrypted automatically with encryption.json**, showing the destination addresses. This is exactly the data the backend listener receives.
+Lists all program events in chronological order. V2 deposits are **decrypted automatically with `ENCRYPTION_SECRET_KEY`**, showing the destination addresses. This is exactly the data the backend listener receives.
 
 ### 5.11 Test the upgrade-authority transfer script (optional)
 
+The script takes key **files**: write temporary ones from `.env`, and delete them afterwards:
+
 ```bash
+yarn -s cli keyfile --role admin    --out /tmp/admin.json
+yarn -s cli keyfile --role operator --out /tmp/operator.json
 # transfer to operator (keypair file, the new wallet co-signs)
-./scripts/transfer-upgrade-authority.sh keys/devnet/operator.json -u devnet -k keys/devnet/admin.json
+./scripts/transfer-upgrade-authority.sh /tmp/operator.json -u devnet -k /tmp/admin.json
 # transfer back to admin (closing the program in step 8 needs admin as upgrade authority)
-./scripts/transfer-upgrade-authority.sh keys/devnet/admin.json -u devnet -k keys/devnet/operator.json
+./scripts/transfer-upgrade-authority.sh /tmp/admin.json -u devnet -k /tmp/operator.json
+rm /tmp/admin.json /tmp/operator.json
 ```
 
 The script asks for the last 4 characters of the program id (`v2rK`) to confirm.
@@ -486,23 +496,19 @@ ls -l target/deploy/cross_vault.so                         # new version ~482KB 
 **③ Upgrade (same command as the first deploy)**
 
 ```bash
-solana program deploy target/deploy/cross_vault.so \
-  --program-id target/deploy/cross_vault-keypair.json \
-  -k keys/devnet/admin.json \
-  -u "$RPC_URL" \
-  --use-rpc
+yarn -s cli deploy
 ```
 
 - The program already exists, so the CLI runs the upgrade flow: it writes the new code into a temporary buffer account, then swaps it in at once.
 - The buffer temporarily needs ~2.5 SOL rent, refunded to admin after the upgrade.
 - If the new code is larger, the CLI extends the program automatically (`extend`); the extra space costs additional rent (~0.005 SOL per KB, ~0.43 SOL here) which stays locked while the program exists.
-- If it fails midway, reclaim the buffer as described in section 7 ("Max retries exceeded") and run it again.
+- If it fails midway, reclaim the buffer with `yarn -s cli deploy --close-buffers` and run it again.
 - Until the upgrade is done, the new CLI cannot call the old program for changed instructions (`rebalance-cctp`, `set-route`).
 
 **④ Verify after upgrading**
 
 ```bash
-solana program show A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK -u "$RPC_URL"   # Last Deployed In Slot increased, Data Length is the new size
+solana program show A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK -u devnet   # Last Deployed In Slot increased, Data Length is the new size
 yarn -s cli status       # roles, pools and vault balances are all still there
 yarn -s cli set-route --domain 0    # the new instruction works
 ```
@@ -513,14 +519,13 @@ yarn -s cli set-route --domain 0    # the new instruction works
 
 Relay has **no Solana devnet deployment** (its testnet API lists no Solana chain), so this cannot be tested on devnet. The local tests (`anchor test`) already run the real Relay program dumped from mainnet; the real end-to-end check must be done on mainnet with a few USDC.
 
-Preparation (once): a mainnet deployment of the program with a USDC pool, and a key directory for mainnet, e.g. `keys/mainnet` (admin, rebalancer with ~0.01 SOL, `evm.json` = the BSC receiving address) and `usdc-mint.txt` = `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`.
+Preparation (once): a mainnet deployment of the program with a USDC pool (see [deployment-guide.md](deployment-guide.md)), and in `.env`: `MAINNET_RPC_URL`, `MAINNET_ADMIN_PRIVATE_KEY` and `MAINNET_REBALANCER_PRIVATE_KEY` (~0.01 SOL); mainnet never reads the shared keys. Set the BSC receiving address in `config.json` `networks.mainnet.relay.defaultRecipient` (or pass `--recipient`). Optional: `RELAY_API_KEY` in `.env` for higher rate limits. Add `--network mainnet` to every command below (or `export NETWORK=mainnet`).
 
 ```bash
-export RPC_URL=<mainnet RPC, e.g. Helius mainnet>  KEYS_DIR=keys/mainnet
-# optional: export RELAY_API_KEY=...   (higher rate limits)
+export NETWORK=mainnet     # same as adding --network mainnet to each command
 
 # 1. quote only (no transaction): checks the quote and prints output, fee, orderId
-yarn -s cli relay-quote --amount 5                      # default: to BSC (56) USDT, recipient = evm.json address
+yarn -s cli relay-quote --amount 5                      # default: config.json relay (BSC USDT, relay.defaultRecipient)
 yarn -s cli relay-quote --amount 5 --to-token 0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d   # BSC USDC instead
 
 # 2. bridge 5 USDC above the watermark (fails with BelowWatermark otherwise; --min-out guards the output)
@@ -572,16 +577,17 @@ yarn -s cli status      # program config, pool status, CCTP routes
 |---|---|
 | `airdrop request failed ... rate limit` | devnet faucet rate limit, use the web faucet https://faucet.solana.com |
 | deploy: `Should return a valid tpu client: PubsubError ... Connection reset by peer` | WebSocket cannot connect behind a proxy; add `--use-rpc` to the deploy command |
-| deploy: `Max retries exceeded` / `429 Too Many Requests` | public devnet node rate limit, switch to a dedicated RPC such as Helius (section 0.3). A failed deploy leaves a buffer account holding ~2 SOL: list with `solana program show --buffers -k keys/devnet/admin.json -u devnet`, reclaim with `solana program close <buffer address> -k keys/devnet/admin.json -u devnet --bypass-warning` |
-| deploy: `Account allocation failed: an account with the same address already exists` | a buffer account for the same `--buffer` key already exists (left over from an interrupted deploy), or the RPC is out of sync. Close it as in the previous row, then deploy again with a new buffer key (or without `--buffer`) |
-| deploy: `insufficient funds` | admin does not have enough SOL; a first deploy needs ~4.5 SOL |
-| `init` fails with `Unauthorized` | the program was not deployed with `-k keys/devnet/admin.json`, so the upgrade authority is not admin |
+| deploy: `Max retries exceeded` / `429 Too Many Requests` | public devnet node rate limit, switch to a dedicated RPC such as Helius (section 0.3). A failed deploy leaves a buffer account holding ~2 SOL: reclaim it with `yarn -s cli deploy --close-buffers` |
+| deploy: `Account allocation failed: an account with the same address already exists` | a buffer account left over from an interrupted deploy, or the RPC is out of sync. Close it as in the previous row, then deploy again |
+| deploy: `insufficient funds` | admin does not have enough SOL; `yarn -s cli env-check` shows how much the deploy needs |
+| `init` / `setup` fails with `Unauthorized` / `initialize must be sent by the upgrade authority` | the program was deployed by a different wallet than `ADMIN_PRIVATE_KEY` |
+| `network is devnet but the RPC (...) is ...` | `DEVNET_RPC_URL` in `.env` points to another network |
 | `create-pool` fails with `already in use` | that pool already exists; check with `yarn -s cli status` |
-| `key not found` / `unknown token` | run `yarn -s cli keygen` first, then `yarn -s cli use-usdc --mint circle` or `yarn -s cli create-token --symbol usdt` |
+| `..._PRIVATE_KEY is not set in .env` / `... pools.USDT.mint is empty` | run `yarn -s cli keygen` first; for tokens `yarn -s cli use-usdc --mint circle` or `yarn -s cli create-token --symbol usdt` |
 | fund commands fail with `AccountNotInitialized` (pool) | the token has no pool yet; run `yarn -s cli create-pool --mint <token>` |
-| `rebalance-cctp` fails with `AccountNotInitialized` (route) | the domain has no registered route; run `yarn -s cli set-route --domain <domain>` |
-| `rebalance-cctp`: `CCTP does not support domain ...` | not a CCTP domain; common ones: 0=Ethereum/Sepolia, 2=OP, 3=Arbitrum, 6=Base |
-| `use-usdc`: `is not a valid token mint` | `RPC_URL` points to the wrong cluster: the Circle address only exists on devnet |
+| `rebalance-cctp` fails with `AccountNotInitialized` (route) | the domain has no registered route; run `yarn -s cli set-route --domain <CHAIN>` or add it to `config.json` `cctp.routes` + `setup` |
+| `rebalance-cctp`: `CCTP does not support domain ...` | not a CCTP domain; the names and numbers are in `config.json` `cctp.domains` (0=Ethereum/Sepolia, 2=OP, 3=Arbitrum, 6=Base) |
+| `use-usdc`: `is not a valid token mint` | wrong network: the Circle address only exists on devnet |
 | balance shows `(no account)` | the role has no USDC account yet; with option A run `use-usdc --mint circle` again (existing accounts are skipped) |
 | `transaction not confirmed in time` | devnet congestion, run it again |
 | `rebalance-cctp` fails with CCTP errors like `InvalidLocalTokenState` | not Circle USDC (option B's self-issued token cannot be bridged) |
@@ -619,18 +625,15 @@ Refunds the ~0.0012 SOL route rent to admin. Must be done before closing the pro
 ### 8.3 Close the program and reclaim its rent
 
 ```bash
-solana program close A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK \
-  --bypass-warning \
-  -k keys/devnet/admin.json \
-  -u "$RPC_URL"
+yarn -s cli close-program      # asks for the last 4 characters of the program id (v2rK); refused on mainnet
 ```
 
-✅ Expected: prints `Closed Program Id ..., ... SOL reclaimed`, the SOL goes back to admin.
+It refuses while any vault still holds tokens (run 8.1 first). ✅ Expected: prints `Closed Program Id ..., ... SOL reclaimed`, the SOL goes back to admin.
 
 ### 8.4 Reclaim buffer accounts left by failed deploys
 
 ```bash
-solana program close --buffers -k keys/devnet/admin.json -u "$RPC_URL"
+yarn -s cli deploy --close-buffers
 ```
 
 If no deploy ever failed, this shows an empty list, which is normal.
@@ -638,11 +641,8 @@ If no deploy ever failed, this shows an empty list, which is normal.
 ### 8.5 Send the remaining SOL of the roles back to admin
 
 ```bash
-ADMIN=$(solana address -k keys/devnet/admin.json)
-for r in operator rebalancer feepayer; do
-  solana transfer $ADMIN ALL -k keys/devnet/$r.json --allow-unfunded-recipient -u "$RPC_URL"
-done
-solana balance -k keys/devnet/admin.json -u "$RPC_URL"
+yarn -s cli sweep-sol      # operator, rebalancer, feepayer -> admin (everything minus the tx fee)
+yarn -s cli balances
 ```
 
 ### 8.6 Ledger
@@ -665,6 +665,6 @@ Measured on a full local run: started with 10 SOL, **9.981 SOL** left after recl
   solana-keygen new -o target/deploy/cross_vault-keypair.json --force --no-bip39-passphrase
   anchor keys sync        # writes the new id into lib.rs and Anchor.toml
   anchor build
-  # then start again from step 3 (the accounts in keys/devnet can be reused)
+  # then start again from step 3 (the wallets in .env can be reused)
   ```
 - Before the mainnet launch, also use a fresh program id and **back up** `target/deploy/cross_vault-keypair.json`.

@@ -1,29 +1,40 @@
 # cross_vault deployment guide
 
-Deploy and configure the program with **your own wallet**. You paste the private key exported from your browser wallet (Phantom / Solflare / Backpack) into `.env`, together with the operator / rebalancer addresses and the CCTP destination vaults. No `keys/` directory is needed.
+> 中文步骤版（只有步骤和命令）: [deployment-guide.zh-CN.md](deployment-guide.zh-CN.md)
+
+Deploy and configure the program with **your own wallet**. Settings live in two files:
+
+| File | Contents | In git? |
+|---|---|---|
+| `.env` | **secrets only**: base58 private keys exported from your browser wallet (Phantom / Solflare / Backpack), `NETWORK`, RPC URLs with API keys | ❌ never (`.gitignore`), template `.env.example` |
+| `config.json` | **non-secret settings per network** (`localnet` / `devnet` / `mainnet`): pools (mint, watermark, per-tx limit), CCTP (domain map, destination vaults, attestation API), Relay (API, chains, default tokens), role addresses | ✅ committed, shared by the team |
 
 ```
-fill in .env  ->  yarn -s cli env-check  ->  yarn -s cli deploy  ->  yarn -s cli setup  ->  done
-  (config)          (check, no tx)          (deploy program)      (init + pools + routes)
+.env + config.json  ->  yarn -s cli env-check  ->  yarn -s cli deploy  ->  yarn -s cli setup  ->  done
+                          (check, no tx)          (deploy program)      (init + pools + routes)
 ```
 
 > Run every command from the project root `internal_bridge_sol/`.
-> The full flow (env-check -> deploy -> setup -> re-run setup -> change config -> setup -> upgrade) was tested on a local validator on 2026-11-12.
+> The full flow (keygen / import-keys -> env-check -> deploy -> setup -> re-run setup -> business commands -> drain -> sweep-sol -> close-program) was tested on a local validator on 2026-11-12.
 > For a full feature walkthrough on devnet (deposits, payouts, CCTP to Sepolia ...), see [devnet-testing-guide.md](devnet-testing-guide.md).
 
 ---
 
-## 1. What gets deployed, and who does what
+## 1. Roles
 
-| Role | What it does | In `.env` | Needs SOL |
+| Role | What it does | Private key in `.env` | Needs SOL |
 |---|---|---|---|
-| **admin** (you) | deploys the program (becomes the **upgrade authority**), initializes, creates pools, registers CCTP routes, pauses; may also call debit / rebalance | `ADMIN_PRIVATE_KEY` (private key) | ~7 SOL on the first deploy, about half is refunded right after |
-| operator | pays users (`debit`), used by the backend | `OPERATOR_ADDRESS` (address only) | ~0.2 SOL for fees later |
-| rebalancer | bridges the funds above the watermark (`rebalance_cctp` / `rebalance_relay`), used by the backend | `REBALANCER_ADDRESS` (address only) | ~0.2 SOL for fees later |
+| **admin** (you) | deploys the program (becomes the **upgrade authority**), initializes, creates pools, registers CCTP routes, pauses; may also call debit / rebalance | `ADMIN_PRIVATE_KEY` (**required** to deploy) | ~7 SOL on the first deploy, about half is refunded right after |
+| operator | pays users (`debit`), used by the backend | `OPERATOR_PRIVATE_KEY`, **or** only its address in `config.json` `addresses.operator` | ~0.2 SOL |
+| rebalancer | bridges the funds above the watermark (`rebalance_cctp` / `rebalance_relay`) | `REBALANCER_PRIVATE_KEY`, **or** `addresses.rebalancer` | ~0.2 SOL |
+| feepayer | sponsors gas of user deposits | `FEEPAYER_PRIVATE_KEY` | ~0.2 SOL |
+| fee-wallet | receives the platform fee on payouts | `FEE_WALLET_PRIVATE_KEY`, **or** `addresses.fee-wallet` | ❌ |
+| user / user2 | test users (devnet only) | `USER_PRIVATE_KEY` / `USER2_PRIVATE_KEY` | ❌ |
 
-- Only the admin private key goes into `.env`. The operator and rebalancer keys stay with the backend, and you only need their **addresses**.
-- `initialize` can only be sent by the upgrade authority. That is why the same wallet deploys and initializes, and the CLI enforces it.
-- Use **three different wallets**. `env-check` warns if operator or rebalancer equals admin.
+- To **deploy and configure**, you only need `ADMIN_PRIVATE_KEY` plus the operator and rebalancer **addresses**, which go in `config.json` `addresses`. Their private keys can stay with the backend.
+- If a role has both a private key in `.env` and an address in `config.json`, the two must match. Otherwise every command stops with an error.
+- `initialize` can only be sent by the upgrade authority, so the same wallet deploys and initializes.
+- Use **separate wallets** for admin, operator and rebalancer. `env-check` warns if any of them are the same.
 
 ---
 
@@ -51,24 +62,22 @@ The **first** deploy to a network needs the matching key file `target/deploy/cro
 
 | Situation | What to do |
 |---|---|
-| **A. Use the project's program id** (normal case: same address as the rest of the team) | Get `cross_vault-keypair.json` from the project owner over a private channel (never chat or git), put it in `target/deploy/`, then check with `solana-keygen pubkey target/deploy/cross_vault-keypair.json`: it must print `A38GT8a6…`. Each network can have that address deployed **once**. If it is already deployed there, you upgrade it instead of deploying (see section 6). |
-| **B. Your own program id** (e.g. your own test deployment) | `solana-keygen new -o target/deploy/cross_vault-keypair.json --no-bip39-passphrase --force`, then `anchor keys sync` (writes the new id into `lib.rs` and `Anchor.toml`), then `anchor build`. This **changes code**: everyone using your deployment needs this exact build. |
+| **A. Use the project's program id** (normal case) | Get `cross_vault-keypair.json` from the project owner over a private channel (never chat or git) and put it in `target/deploy/`. Check it with `solana-keygen pubkey target/deploy/cross_vault-keypair.json`: it must print `A38GT8a6…`. Each network can have that address deployed **once**. If it is already deployed there, you upgrade it instead (section 7). |
+| **B. Your own program id** (your own test deployment, or a vanity address) | `solana-keygen new -o target/deploy/cross_vault-keypair.json --no-bip39-passphrase --force` (or `solana-keygen grind --starts-with <prefix>:1` and copy the result there), then `anchor keys sync`, then `anchor build`. This **changes code** (`lib.rs`, `Anchor.toml`): everyone using that deployment needs the same build. |
 
 Upgrades do not need this file, only the admin key (the upgrade authority).
 
 ---
 
-## 3. Fill in `.env`
+## 3. `.env`: secrets
 
 ```bash
 cp .env.example .env
 ```
 
-Then open `.env` in an editor and fill it in. Every variable is explained inside the file.
+### 3.1 Export a private key from your wallet
 
-### 3.1 Export the admin private key from your wallet
-
-Create a **new account** in the wallet for this purpose. Do not use a personal wallet that holds other funds.
+Create a **new account** in the wallet for this. Do not use a personal wallet that holds other funds.
 
 | Wallet | Where |
 |---|---|
@@ -76,145 +85,145 @@ Create a **new account** in the wallet for this purpose. Do not use a personal w
 | Solflare | Settings -> pick the wallet -> Export Private Key |
 | Backpack | Settings -> pick the wallet -> Show Private Key |
 
-You get a long base58 string (about 88 characters). Paste it after `ADMIN_PRIVATE_KEY=`, with no quotes or spaces.
+You get a long base58 string (~88 characters). Paste it after `ADMIN_PRIVATE_KEY=` with no quotes or spaces.
 
-> The **address** (about 44 characters, shown on the wallet's main screen) is NOT the private key. If you paste the address, the CLI rejects it with `looks like a wallet ADDRESS`.
+> The **address** (~44 characters, shown on the wallet's main screen) is NOT the private key. If you paste the address, the CLI rejects it with `looks like a wallet ADDRESS`.
 > A solana CLI key file content `[12,34,...]` is also accepted.
 
-### 3.2 Example (devnet)
+### 3.2 Variables
+
+| Variable | Meaning |
+|---|---|
+| `NETWORK` | default network: `devnet` (default) / `mainnet` / `localnet`. Any command takes `--network devnet|mainnet|localnet` to override it, e.g. `yarn -s cli deploy --network mainnet`. **Every transaction is refused** if the RPC turns out to be a different network (checked against the chain's genesis hash). |
+| `DEVNET_RPC_URL` / `MAINNET_RPC_URL` | RPC per network, optional (empty = `config.json` `rpc`, the public node). `RPC_URL` is a shared fallback. Use a free dedicated RPC (https://dashboard.helius.dev): the public node rate-limits the hundreds of transactions a deploy sends. Put it here, not in `config.json`, because the URL contains an API key. |
+| `ADMIN_PRIVATE_KEY` ... `USER2_PRIVATE_KEY` | base58 private keys of the roles (section 1), used on devnet / localnet (`DEVNET_ADMIN_PRIVATE_KEY` etc. override them) |
+| `MAINNET_ADMIN_PRIVATE_KEY` (+ `MAINNET_<ROLE>_PRIVATE_KEY`) | **mainnet reads private keys ONLY from `MAINNET_` names**, never the shared ones, so test wallets can never sign on mainnet |
+| `ENCRYPTION_SECRET_KEY` | x25519 secret (base64) used to decrypt V2 deposits; `yarn -s cli keygen` creates one |
+| `EVM_PRIVATE_KEY` | devnet only: EVM test wallet that receives the CCTP test transfer on Sepolia and pays `receiveMessage` gas |
+| `RELAY_API_KEY`, `EVM_RPC_URL` | optional |
+
+**Test wallets in one command** (devnet / local):
 
 ```bash
-RPC_URL=https://devnet.helius-rpc.com/?api-key=YOUR_KEY
-ADMIN_PRIVATE_KEY=4Zx...your base58 private key...9Qa
-
-OPERATOR_ADDRESS=CmASfSYYFpkKZVJqqpKZCKTKBofri1mqyhNe11Eh74Uf
-REBALANCER_ADDRESS=HWc1pFon5BHW3EFFMSZMFDn2Ye6ntuYvsUwaYc9U3AZN
-
-USDC_MINT=4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU
-USDC_WATERMARK=1000
-USDC_MAX_DEBIT=
-
-USDT_MINT=
-USDT_WATERMARK=
-USDT_MAX_DEBIT=
-
-CCTP_ROUTE_ETHEREUM=0xYourVaultOnSepolia0000000000000000000000
-CCTP_ROUTE_BASE=
+yarn -s cli keygen      # fills every EMPTY key in .env with a new wallet; existing keys are never overwritten
 ```
 
-### 3.3 Variable reference
+**Moving an old `keys/devnet` directory**: `yarn -s cli import-keys --dir keys/devnet` copies every key into `.env` and the `<token>-mint.txt` files into `config.json`. It never overwrites anything and lists any conflicts. Check the result with `yarn -s cli balances`, then delete the directory.
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `RPC_URL` | ✅ | Solana RPC. Use a free dedicated one (https://dashboard.helius.dev). The public node rate-limits the hundreds of transactions a deploy sends. The CLI detects mainnet / devnet from the chain itself, not from the URL. |
-| `ADMIN_PRIVATE_KEY` | ✅ | the deployer / admin wallet private key |
-| `OPERATOR_ADDRESS` | ✅ | operator wallet address |
-| `REBALANCER_ADDRESS` | ✅ | rebalancer wallet address |
-| `USDC_MINT` / `USDT_MINT` | at least one | token mint of the pool. Empty = skip that token. Mainnet USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, mainnet USDT `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB`, devnet USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU` |
-| `<TOKEN>_WATERMARK` | ✅ if the mint is set | amount kept in the vault, in tokens (`1000` = 1000 USDC). Only the part above it can be rebalanced. |
-| `<TOKEN>_MAX_DEBIT` | | max amount per `debit` instruction, in tokens. Empty / `0` = unlimited. On mainnet set it to the largest normal order. |
-| `CCTP_ROUTE_<CHAIN>` | | our vault contract on that EVM chain (`0x` + 40 hex). `rebalance_cctp` can **only** send USDC to these addresses. Chains: `ETHEREUM`(0) `AVALANCHE`(1) `OPTIMISM`(2) `ARBITRUM`(3) `BASE`(6) `POLYGON`(7). On devnet the same names mean the testnets (Ethereum Sepolia, Base Sepolia ...). |
-| `ENV_FILE` | | (shell only) use another file, e.g. `ENV_FILE=.env.mainnet yarn -s cli setup` |
+Variables set in the shell take priority over `.env`. `ENV_FILE=<path>` picks another file.
 
-Variables set in the shell take priority over `.env`, e.g. `RPC_URL=http://127.0.0.1:8899 yarn -s cli env-check`.
+> Back up `.env` (password manager, encrypted disk). It is the **only** copy of the wallets.
 
 ---
 
-## 4. Check (sends nothing)
+## 4. `config.json`: settings
+
+Edit the section of your network (`networks.devnet`, `networks.mainnet` ...):
+
+```jsonc
+"devnet": {
+  "rpc": "https://api.devnet.solana.com",               // default RPC; DEVNET_RPC_URL in .env overrides it
+  "addresses": {                                         // only for roles WITHOUT a private key in .env
+    "operator": "CmASfSYYFpkKZVJqqpKZCKTKBofri1mqyhNe11Eh74Uf",
+    "rebalancer": "HWc1pFon5BHW3EFFMSZMFDn2Ye6ntuYvsUwaYc9U3AZN",
+    "fee-wallet": ""
+  },
+  "pools": {                                             // one pool per token; empty mint = skip that token
+    "USDC": { "mint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", "watermark": "5",  "maxDebit": "0" },
+    "USDT": { "mint": "",                                             "watermark": "50", "maxDebit": "100" }
+  },
+  "cctp": {
+    "attestationApi": "https://iris-api-sandbox.circle.com",   // Circle Iris: sandbox on devnet, https://iris-api.circle.com on mainnet
+    "domains": { "ETHEREUM": 0, "AVALANCHE": 1, "OPTIMISM": 2, "ARBITRUM": 3, "BASE": 6, "POLYGON": 7 },
+    "routes": { "ETHEREUM": "0xOurVaultOnSepolia..." },        // chain name (from domains) -> our vault; rebalance_cctp can ONLY send there
+    "evmTestnet": { "name": "Ethereum Sepolia", "chainId": 11155111, "rpc": "...", "messageTransmitter": "0x...", "usdc": "0x...", "explorer": "..." }
+  },
+  "relay": {
+    "api": "https://api.relay.link",
+    "chains": { "BSC": 56, "ETHEREUM": 1, "BASE": 8453 },     // chain name -> Relay chain id (--chain BSC)
+    "defaultChain": "BSC",
+    "defaultRecipient": "",                                    // our vault on the destination chain; empty = EVM_PRIVATE_KEY address (testing)
+    "defaultTokens": { "BSC": "0x55d398326f99059ff775485246999027b3197955" }   // BSC USDT
+  }
+}
+```
+
+(`//` comments are only for this guide. `config.json` itself is plain JSON and must not contain comments.)
+
+| Field | Meaning |
+|---|---|
+| `pools.<TOKEN>.mint` | token mint. Mainnet USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, USDT `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB`; devnet USDC `4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU`. `--mint usdc` / `--mint usdt` in all commands refer to these. |
+| `pools.<TOKEN>.watermark` | amount kept in the vault, **in tokens, as a string** (`"1000"` = 1000 USDC). Only the part above it can be rebalanced. Required once the mint is set. **Mainnet ships with it empty on purpose**: you must choose a value. |
+| `pools.<TOKEN>.maxDebit` | max per `debit` instruction, in tokens. `""` / `"0"` = unlimited. On mainnet set it to the largest normal order. |
+| `cctp.domains` | CCTP domain numbers (fixed by Circle, the same on testnet and mainnet). Commands accept the names: `--domain BASE`. |
+| `cctp.routes` | our vault contract (`0x` + 40 hex) per chain name. `setup` registers them on chain. **Verify every address twice on mainnet**: funds sent to a wrong address cannot be recovered. |
+| `cctp.evmTestnet` | used only by `cctp-receive` / `evm-balance` on devnet; `null` elsewhere |
+| `relay.*` | defaults of `relay-quote` / `rebalance-relay` (each can be overridden with `--chain` / `--to-token` / `--recipient`) |
+
+> The **on-chain** CCTP / Relay program addresses are not in `config.json`. They are constants compiled into the program (`rebalance_cctp.rs` / `rebalance_relay.rs`). If they lived in a config file, they could drift from what the program accepts. Changing them means upgrading the program.
+
+---
+
+## 5. Check (sends nothing)
 
 ```bash
 yarn -s cli env-check
 ```
 
-Example output:
-
 ```
+env file        /…/internal_bridge_sol/.env
+config file     /…/internal_bridge_sol/config.json  [networks.devnet]
 RPC_URL         https://devnet.helius-rpc.com/?api-key=...
-network         devnet
-admin           Dm5d9WG8t3tJoEFBus6nxmqRuDPv9hSsbbvXWv954yJ8  (8.2 SOL)
-operator        CmASfSYYFpkKZVJqqpKZCKTKBofri1mqyhNe11Eh74Uf
-rebalancer      HWc1pFon5BHW3EFFMSZMFDn2Ye6ntuYvsUwaYc9U3AZN
+network         devnet, RPC is devnet ✔
+admin           AhLW…  (8.2 SOL)
+operator        CmAS…  (private key in .env)
+rebalancer      HWc1…  (address in config.json)
 
 program id      A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK
 deployed        no
   deploy needs   ~6.7 SOL (half is refunded after the deploy)
 initialized     no
 
-pools in .env
-  USDC  4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU  watermark 1000  per-tx limit unlimited
+pools
+  USDC  4zMM…  watermark 5  per-tx limit unlimited
 CCTP routes
-  ETHEREUM   domain 0  -> 0x...
+  ETHEREUM   domain 0  -> 0x…
 
 next: yarn -s cli deploy
 ```
 
-Check that:
-- `network` is the network you mean to use
-- `admin` is the address shown in your wallet
-- no `⚠️` lines
+Check that `network` shows ✔, `admin` is your wallet's address, and no line has `⚠️`.
 
-**Get SOL for admin:**
-- devnet: https://faucet.solana.com (choose Devnet, paste the admin address), or `solana airdrop 2 <admin address> -u devnet`
-- mainnet: send SOL from an exchange or another wallet
+**Get SOL for admin**: on devnet use https://faucet.solana.com or `yarn -s cli airdrop --to admin --sol 2`. On mainnet send SOL from an exchange or another wallet. `yarn -s cli fund --sol 0.2` then sends 0.2 SOL each to operator, rebalancer and feepayer.
 
 ---
 
-## 5. Deploy
+## 6. Deploy and configure
 
 ```bash
-yarn -s cli deploy
+yarn -s cli deploy            # deploy (admin becomes the upgrade authority)
+yarn -s cli setup --dry-run   # preview: initialize / roles / pools / CCTP routes
+yarn -s cli setup             # apply
 ```
 
-- The CLI writes the admin key to a temporary file (mode 600) only while `solana program deploy` runs, then deletes it, even if the deploy fails.
-- It checks that `target/deploy/cross_vault-keypair.json` matches the built program id before sending anything.
-- On mainnet it asks you to type `yes` first.
-- It ends by printing the upgrade authority, which must be your admin address.
+`deploy`:
+- writes the admin key to a temporary file (mode 600) only while `solana program deploy` runs, then deletes it, even if the deploy fails
+- checks `target/deploy/cross_vault-keypair.json` against the built program id first
+- asks you to type `yes` on mainnet
+- if it fails halfway, `yarn -s cli deploy --close-buffers` reclaims the SOL left in the buffer account; then deploy again
 
-**If the deploy fails halfway** (network problems, out of SOL), the SOL already spent on uploading sits in a "buffer" account. Get it back with:
+`setup` compares the chain with `config.json` (and the role keys in `.env`) and **only sends the differences**, one transaction per step. Re-running it is safe:
 
-```bash
-yarn -s cli deploy --close-buffers
-```
-
-Then run `yarn -s cli deploy` again.
-
----
-
-## 6. Configure: initialize + pools + CCTP routes
-
-Preview first; this sends nothing:
-
-```bash
-yarn -s cli setup --dry-run
-```
-
-```
-network devnet, 3 change(s):
-  1. initialize: admin Dm5d…, operator CmAS…, rebalancer HWc1…
-  2. create_pool USDC: watermark 1000, per-tx limit unlimited
-  3. set_cctp_route ETHEREUM (domain 0): (none) -> 0x...
-```
-
-If the plan looks right, send it:
-
-```bash
-yarn -s cli setup
-```
-
-It sends one transaction per step and then prints the on-chain status (`yarn -s cli status` shows it any time).
-
-**`setup` is safe to re-run.** It compares the chain with `.env` and only sends the differences:
-
-| You change in `.env` | Re-running `setup` sends |
+| You change | Re-running `setup` sends |
 |---|---|
-| nothing | nothing (`on-chain config already matches .env`) |
-| `OPERATOR_ADDRESS` / `REBALANCER_ADDRESS` | `set_config` (role switch) |
-| `<TOKEN>_WATERMARK` / `<TOKEN>_MAX_DEBIT` | `set_pool_config` |
-| a new `<TOKEN>_MINT` | `create_pool` (a pool cannot be deleted later, double-check the mint) |
-| a new or changed `CCTP_ROUTE_<CHAIN>` | `set_cctp_route` |
-| a `CCTP_ROUTE_<CHAIN>` emptied | **nothing**. setup never removes routes. It prints a note; remove the route explicitly with `yarn -s cli remove-route --domain <n>` |
+| nothing | nothing (`on-chain config already matches config.json`) |
+| operator / rebalancer (key in `.env` or `addresses`) | `set_config` |
+| `pools.<TOKEN>.watermark` / `maxDebit` | `set_pool_config` |
+| a new `pools.<TOKEN>.mint` | `create_pool` (a pool cannot be deleted later, so double-check the mint) |
+| a new or changed `cctp.routes.<CHAIN>` | `set_cctp_route` |
+| a route removed from `config.json` | **nothing**. `setup` never removes routes; it prints a note. Remove it explicitly with `yarn -s cli remove-route --domain <CHAIN>` |
 
-If a step fails, the earlier steps stay done. Fix the cause and run `setup` again, and it continues from where it stopped.
+If a step fails, the earlier steps stay done. Fix the cause and run `setup` again.
 
 ---
 
@@ -222,40 +231,42 @@ If a step fails, the earlier steps stay done. Fix the cause and run `setup` agai
 
 ```bash
 git pull && anchor build
-yarn -s cli deploy          # detects the program exists -> upgrade (only the upgrade authority = admin can)
+yarn -s cli deploy          # program exists -> upgrade (only the upgrade authority = admin can)
 ```
 
-An upgrade keeps the program id and all on-chain data (Config, pools, routes, vault funds). Running `setup` again is only needed if `.env` changed.
+An upgrade keeps the program id and all on-chain data (Config, pools, routes, vault funds).
 
 ---
 
 ## 8. Mainnet checklist
 
-1. Use a separate file: `cp .env.example .env.mainnet`, and run every command with `ENV_FILE=.env.mainnet`. This way devnet and mainnet configs never mix.
-2. `RPC_URL` = a mainnet RPC; `env-check` must print `network mainnet`.
-3. Mainnet mints: USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`, USDT `Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB`.
-4. `CCTP_ROUTE_*` = our **mainnet** vault contracts. Verify every address twice: funds sent to a wrong address cannot be recovered.
-5. Set `<TOKEN>_MAX_DEBIT` (not unlimited).
-6. `deploy` and `setup` ask for `yes` on mainnet. `--yes` skips the question; use it only in scripts.
-7. Run one small end-to-end transfer per route (and Relay) before automating anything; see README "Mainnet launch steps".
-8. **Hand over to a multisig** (README "Mainnet launch steps" 5 and 6):
-   - Program admin: `yarn -s cli transfer-admin --to <Squads vault address>`, then accept in Squads.
+1. In `.env` set `MAINNET_RPC_URL` and `MAINNET_ADMIN_PRIVATE_KEY` (a fresh wallet). Run every mainnet command with `--network mainnet`; mainnet never uses the shared (devnet) keys.
+2. `yarn -s cli env-check --network mainnet` must show `mainnet, RPC is mainnet ✔`.
+3. In `config.json` `networks.mainnet`:
+   - `addresses.operator` / `rebalancer` / `fee-wallet` = the backend's addresses
+   - `pools.USDC` / `pools.USDT`: set `watermark` and `maxDebit` (both ship empty on purpose)
+   - `cctp.routes`: our **mainnet** vault contracts; verify every address twice
+   - `relay.defaultRecipient`: our vault on BSC
+4. `deploy` / `setup` ask for `yes` on mainnet. `--yes` skips the question; use it only in scripts. `create-token` and `close-program` refuse to run on mainnet.
+5. Run one small end-to-end transfer per route (and Relay) before automating anything; see README "Mainnet launch steps".
+6. **Hand over to a multisig** (README "Mainnet launch steps" 5 and 6):
+   - Program admin: `yarn -s cli transfer-admin --to <Squads vault address> --network mainnet`, then accept in Squads.
    - Upgrade authority: `scripts/transfer-upgrade-authority.sh` needs a key **file**. Create a temporary one, then delete it:
      ```bash
-     ENV_FILE=.env.mainnet yarn -s cli keyfile --out /tmp/admin.json
-     ./scripts/transfer-upgrade-authority.sh <Squads vault address> -k /tmp/admin.json -u <your mainnet RPC_URL, or mainnet-beta>
+     yarn -s cli keyfile --out /tmp/admin.json --network mainnet
+     ./scripts/transfer-upgrade-authority.sh <Squads vault address> -k /tmp/admin.json -u <mainnet RPC URL, or mainnet-beta>
      rm /tmp/admin.json
      ```
-   After the handover, the wallet in `.env` is no longer admin or upgrade authority. Future `deploy` / `setup` calls from it are refused, and changes go through Squads proposals instead.
+   After the handover, `MAINNET_ADMIN_PRIVATE_KEY` no longer controls anything. `deploy` and `setup` sent with it are refused; changes go through Squads proposals instead.
 
 ---
 
-## 9. Keeping the private key safe
+## 9. Keeping the keys safe
 
-- `.env`, `.env.*` are in `.gitignore` (`.env.example` is the only exception). Before committing, `git status` must not list any `.env` file.
-- Never paste `.env` contents into chat, tickets or screenshots. The CLI never prints the private key; it only prints addresses.
+- `.env` and `.env.*` are git-ignored (only `.env.example` is committed). `config.json` must never contain a private key or an API key.
+- Before committing, `git status` must not list any `.env` file.
+- Never paste `.env` contents into chat, tickets or screenshots. The CLI never prints private keys, only addresses.
 - The admin wallet controls the whole program (roles, routes, watermark, pause, upgrades). After launch, move admin and the upgrade authority to a multisig (section 8). Then delete the key from `.env`, or empty the wallet.
-- When you are done deploying, you can delete the `ADMIN_PRIVATE_KEY` line. Read-only commands like `yarn -s cli status` do not need it.
 
 ---
 
@@ -263,19 +274,21 @@ An upgrade keeps the program id and all on-chain data (Config, pools, routes, va
 
 | Message | Cause / fix |
 |---|---|
-| `ADMIN_PRIVATE_KEY looks like a wallet ADDRESS` | you pasted the address, export the private key (3.1) |
-| `ADMIN_PRIVATE_KEY is not a valid private key` | incomplete copy, extra characters, or a seed phrase (12/24 words are not accepted; export the private key instead) |
-| `OPERATOR_ADDRESS is empty` | fill in the operator / rebalancer addresses |
-| `<TOKEN>_MINT is set but <TOKEN>_WATERMARK is empty` | set the watermark (e.g. `0` for none) |
-| `... is not a token mint on this network` | devnet mint used on mainnet or the other way round |
-| `invalid EVM address` | a CCTP route must be `0x` + 40 hex characters |
+| `network is devnet but the RPC (...) is mainnet` | the network and its RPC disagree; fix `--network` / `NETWORK`, or `DEVNET_RPC_URL` / `MAINNET_RPC_URL` |
+| `ADMIN_PRIVATE_KEY is not set in .env` | paste the key (3.1), or `yarn -s cli keygen` for test wallets |
+| `ADMIN_PRIVATE_KEY looks like a wallet ADDRESS` | you pasted the address; export the private key |
+| `... is not a valid private key` | incomplete copy, extra characters, or a seed phrase (12/24 words are not accepted; export the private key) |
+| `operator is not configured: set OPERATOR_PRIVATE_KEY ... or ... addresses.operator` | give the role a key in `.env` or an address in `config.json` |
+| `operator: OPERATOR_PRIVATE_KEY in .env is X but ... addresses.operator is Y` | keep only one of the two, or make them match |
+| `... pools.USDT.watermark is empty` | set the watermark (`"0"` = keep nothing) |
+| `... is not a token mint on devnet` | a mainnet mint in the devnet section, or the other way round |
+| `... cctp.routes.X: X is not in cctp.domains` / `is not a valid EVM address` | use a chain name from `cctp.domains`, with an address of `0x` + 40 hex |
+| `config.json is not valid JSON` | a missing comma / quote, or a `//` comment; check with an editor |
 | `target/deploy/cross_vault-keypair.json missing` / `... but the program is built for ...` | see 2.3 |
 | `cannot upgrade: upgrade authority is X` / `initialize must be sent by the upgrade authority` / `the program admin is X` | the program on this network was deployed by another wallet: use that wallet's key, or deploy under your own program id (2.3 B) |
-| `429 Too Many Requests` / deploy very slow | use a dedicated RPC (Helius etc.) in `RPC_URL` |
+| `429 Too Many Requests` / deploy very slow | set a dedicated RPC in `DEVNET_RPC_URL` / `MAINNET_RPC_URL` |
 | deploy failed halfway, SOL missing | `yarn -s cli deploy --close-buffers` |
 | `cannot run solana CLI` | install the Solana CLI and make sure `solana` is on `PATH` |
-| `ENV_FILE not found` | wrong path in `ENV_FILE` |
-| `Should return a valid tpu client` | behind a proxy: the CLI already passes `--use-rpc`; if you run `solana program deploy` yourself, add it too |
 
 ---
 
@@ -283,12 +296,15 @@ An upgrade keeps the program id and all on-chain data (Config, pools, routes, va
 
 | Command | Sends txs | Purpose |
 |---|---|---|
-| `yarn -s cli env-check` | no | show network, addresses, balance, deploy state, what setup would configure |
-| `yarn -s cli deploy` | yes | first deploy or upgrade, with `ADMIN_PRIVATE_KEY` |
+| `yarn -s cli keygen` | no | create test wallets for every empty key in `.env` (+ encryption and EVM keys) |
+| `yarn -s cli import-keys --dir keys/devnet` | no | move an old key directory into `.env` / `config.json` |
+| `yarn -s cli env-check` | no | network, addresses, balance, deploy state, what setup would configure |
+| `yarn -s cli deploy` | yes | first deploy or upgrade |
 | `yarn -s cli deploy --close-buffers` | yes | reclaim SOL left by a failed deploy |
-| `yarn -s cli setup --dry-run` | no | print the changes needed to match `.env` |
-| `yarn -s cli setup` | yes | initialize / roles / pools / CCTP routes, only the differences |
-| `yarn -s cli status` | no | on-chain status: roles, pools, routes |
-| `yarn -s cli keyfile --out <path>` | no | write the admin key to a temp file for tools that need one (delete it afterwards) |
+| `yarn -s cli setup [--dry-run]` | yes / no | initialize, roles, pools, CCTP routes: only the differences |
+| `yarn -s cli status` / `balances` | no | on-chain status / balances of all roles |
+| `yarn -s cli keyfile --out <path>` | no | write a key to a temp file for tools that need one (delete it afterwards) |
+| `yarn -s cli sweep-sol` | yes | testing: send operator / rebalancer / feepayer SOL back to admin |
+| `yarn -s cli close-program` | yes | testing only, irreversible: close the program and reclaim its rent (refused on mainnet, requires drained vaults) |
 
-All other CLI commands (`pause`, `set-pool`, `remove-route`, `transfer-admin`, `payout`, `rebalance-cctp` ...) also read `ADMIN_PRIVATE_KEY` / `<ROLE>_PRIVATE_KEY` and `USDC_MINT` / `USDT_MINT` from `.env`; see `yarn -s cli help`.
+`yarn -s cli help` lists every command.

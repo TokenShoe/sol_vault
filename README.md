@@ -92,8 +92,10 @@ tests/cross_vault.ts        # integration tests
 scripts/transfer-upgrade-authority.sh  # transfer the program upgrade authority after deployment (e.g. to a Squads multisig)
 scripts/cli.ts              # CLI: yarn -s cli help (initialize, deposit, payout, CCTP bridging, Sepolia receive, events ...)
 docs/devnet-testing-guide.md  # step-by-step devnet testing + reclaiming SOL afterwards
-docs/deployment-guide.md    # deploy + configure with your own wallet key from .env (env-check / deploy / setup)
-.env.example                # template of the deploy config (.env is git-ignored)
+docs/deployment-guide.zh-CN.md  # 中文部署指南: steps and commands only (deploy, setup / single config commands, test commands)
+docs/deployment-guide.md    # deploy + configure with your own wallet: .env (secrets) + config.json (settings); env-check / deploy / setup
+.env.example                # template of .env: base58 private keys, NETWORK, DEVNET_RPC_URL / MAINNET_RPC_URL (.env itself is git-ignored)
+config.json                 # non-secret CLI settings per network: pools, CCTP domains / routes / attestation API, Relay, Sepolia
 ```
 
 ---
@@ -296,27 +298,31 @@ solana program deploy target/deploy/cross_vault.so --program-id target/deploy/cr
 ```
 Program id: `A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK`, its keypair is `target/deploy/cross_vault-keypair.json`; back it up (it is deleted together with `target/`).
 
-### Deploying with your own wallet (.env)
+### Deploying with your own wallet (.env + config.json)
 
-See [docs/deployment-guide.md](docs/deployment-guide.md). Put the private key exported from Phantom / Solflare / Backpack, the operator / rebalancer addresses, the pools and the CCTP destination vaults in `.env` (template `.env.example`), then:
+See [docs/deployment-guide.md](docs/deployment-guide.md) (中文步骤版: [docs/deployment-guide.zh-CN.md](docs/deployment-guide.zh-CN.md)). The CLI reads two files at the project root:
+- `.env` (secrets, git-ignored, template `.env.example`): `NETWORK` (default network; any command takes `--network devnet|mainnet|localnet`), `DEVNET_RPC_URL` / `MAINNET_RPC_URL`, and base58 private keys `ADMIN_PRIVATE_KEY`, `OPERATOR_PRIVATE_KEY`, `REBALANCER_PRIVATE_KEY`, `FEEPAYER_PRIVATE_KEY`, `FEE_WALLET_PRIVATE_KEY`, `USER_PRIVATE_KEY`, `USER2_PRIVATE_KEY`, plus `ENCRYPTION_SECRET_KEY` and `EVM_PRIVATE_KEY`; mainnet reads private keys only from `MAINNET_` names (e.g. `MAINNET_ADMIN_PRIVATE_KEY`)
+- `config.json` (committed), section `networks.<NETWORK>`: `rpc`, `addresses` (role addresses when no private key is given), `pools` (mint / watermark / maxDebit), `cctp` (attestation API, domain map, routes = our vault per chain, Sepolia), `relay` (API, chains, default token / recipient)
+
 ```bash
+cp .env.example .env         # paste ADMIN_PRIVATE_KEY (or: yarn -s cli keygen for test wallets)
 yarn -s cli env-check        # check config, network, balance (no tx)
 yarn -s cli deploy           # first deploy or upgrade (admin = upgrade authority)
 yarn -s cli setup --dry-run  # preview: initialize / roles / pools / CCTP routes
-yarn -s cli setup            # apply; idempotent, re-run after editing .env
+yarn -s cli setup            # apply; idempotent, re-run after editing config.json
 ```
-All CLI commands read `<ROLE>_PRIVATE_KEY` (e.g. `ADMIN_PRIVATE_KEY`) from `.env` before falling back to `keys/devnet/<role>.json`, so the existing key-file flow keeps working.
+There is no `keys/` directory any more; an old one is moved with `yarn -s cli import-keys --dir keys/devnet`. Every transaction is refused when the RPC is not the `NETWORK` (checked by genesis hash). The on-chain CCTP / Relay program addresses stay compiled into the program, not in `config.json`.
 
 ### devnet testing
 
 See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create accounts -> get SOL -> deploy -> initialize -> feature tests -> upgrade -> drain vaults / close the program / reclaim SOL.
 
 ### Mainnet launch steps (in order)
-1. **Deploy**: `solana program deploy ...` (the deploying wallet = upgrade authority); with `.env`: `ENV_FILE=.env.mainnet yarn -s cli deploy`
+1. **Deploy**: `solana program deploy ...` (the deploying wallet = upgrade authority); with the CLI: `yarn -s cli deploy --network mainnet`
 2. **Initialize**: call `initialize` with the deploying wallet (only the upgrade authority can)
 3. **Create pools**: admin calls `create_pool(watermark, per-tx limit)` for every supported token (USDC, USDT ...)
 4. **Register CCTP routes**: admin calls `set_cctp_route(domain, our vault contract)` for every destination chain
-   (steps 2-4 in one go from `.env`: `ENV_FILE=.env.mainnet yarn -s cli setup`, see [docs/deployment-guide.md](docs/deployment-guide.md))
+   (steps 2-4 in one go from `config.json` `networks.mainnet`: `yarn -s cli setup --network mainnet`, see [docs/deployment-guide.md](docs/deployment-guide.md))
 4.1 **Relay**: check Relay's token account exists for every token you will send (`ATA(mint, 7uTT8Xi5…)`; USDC exists), then run one small end-to-end `rebalance-relay` (e.g. 5 USDC) and confirm arrival and the refund path before automating it
 5. **Transfer the upgrade authority to a multisig**:
    ```bash
@@ -347,5 +353,5 @@ See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create account
 7.1 **USDT**: USDT cannot use CCTP; rebalance it with `rebalance_relay` (or swap to USDC on Solana first); Tether can freeze USDT, so keep the USDT watermark low; the backend decides which token users buy with and get paid in, and must account per `mint`.
 8. **TS**: the Anchor 1.x TS client does not infer `tokenProgram`; pass `TOKEN_PROGRAM_ID` explicitly. Use `confirmed` for the provider.
 9. **Reserved space before mainnet**: consider adding a `_reserved: [u8; N]` field at the end of Config and Pool so future fields can be added through upgrades without data migration.
-9.1 **Deploying from `.env`** (`docs/deployment-guide.md`, tested on a local validator 2026-11-12: deploy, setup, idempotent re-run, role / pool / route changes, upgrade, bad-key and wrong-admin rejections): the admin private key sits in plain text in `.env` while deploying. Use a fresh wallet for it, move admin and the upgrade authority to a multisig after launch, then delete the key from `.env`. `setup` never removes CCTP routes (only adds / updates); `deploy` / `setup` ask for `yes` on mainnet (detected by genesis hash). Not yet run against a real devnet / mainnet RPC.
+9.1 **Keys in `.env`, settings in `config.json`** (`docs/deployment-guide.md`; tested on a local validator 2026-11-12: keygen, import-keys from `keys/devnet` with every address verified, deploy, setup, idempotent re-run, role / pool / route changes, upgrade, deposits / payouts, drain, sweep-sol, close-program, network-mismatch / bad-key / wrong-admin / bad-config rejections; the old `keys/devnet` was imported into `.env` and deleted): private keys sit in plain text in `.env`, which is now the only copy of the devnet wallets, so back it up. Use a fresh wallet for admin, move admin and the upgrade authority to a multisig after launch, then delete the key. `setup` never removes CCTP routes (only adds / updates); `deploy` / `setup` ask for `yes` on mainnet; `create-token` / `close-program` refuse mainnet. Deploy / setup have not yet been run against a real devnet / mainnet RPC.
 10. **Optional enhancements**: on-chain order de-duplication (one PDA per order or a bitmap), multiple operators, a separate per-tx cap for `rebalance_relay` (in a new account, so the Pool layout does not change).

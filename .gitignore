@@ -3,6 +3,7 @@ node_modules
 .anchor
 *.log
 test-ledger
+# old key directories (now in .env; move with yarn -s cli import-keys)
 keys/
 # deploy config with private keys (template: .env.example)
 .env

@@ -377,9 +377,9 @@ export interface CctpMessageStatus {
  */
 export async function fetchCctpAttestation(
   txSignature: string,
-  opts: { testnet?: boolean; fetchImpl?: typeof fetch } = {}
+  opts: { testnet?: boolean; /** Iris base URL, overrides testnet */ api?: string; fetchImpl?: typeof fetch } = {}
 ): Promise<CctpMessageStatus | null> {
-  const base = opts.testnet === false ? CCTP.IRIS.MAINNET : CCTP.IRIS.TESTNET;
+  const base = opts.api ?? (opts.testnet === false ? CCTP.IRIS.MAINNET : CCTP.IRIS.TESTNET);
   const f = opts.fetchImpl ?? fetch;
   const res = await f(`${base}/v2/messages/${CCTP.SOLANA_DOMAIN}?transactionHash=${txSignature}`);
   if (res.status === 404) return null; // Circle has not indexed this transaction yet
@@ -494,6 +494,8 @@ export interface RelayQuoteRequest {
   /** Slippage in basis points (optional, Relay default otherwise) */
   slippageBps?: number;
   apiKey?: string;
+  /** Relay API base URL (default RELAY.API) */
+  api?: string;
 }
 
 /**
@@ -515,7 +517,7 @@ export async function getRelayQuote(q: RelayQuoteRequest): Promise<any> {
     includeProtocolData: true,
   };
   if (q.slippageBps !== undefined) body.slippageTolerance = String(q.slippageBps);
-  const res = await fetch(`${RELAY.API}/quote/v2`, {
+  const res = await fetch(`${q.api ?? RELAY.API}/quote/v2`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(q.apiKey ? { "x-api-key": q.apiKey } : {}) },
     body: JSON.stringify(body),
@@ -649,8 +651,8 @@ export async function rebalanceRelay(
 }
 
 /** Tell Relay about a transaction whose deposit happened inside our program (CPI), so it is picked up promptly */
-export async function indexRelayTx(signature: string, requestId?: string, apiKey?: string): Promise<string> {
-  const res = await fetch(`${RELAY.API}/transactions/index`, {
+export async function indexRelayTx(signature: string, requestId?: string, apiKey?: string, api: string = RELAY.API): Promise<string> {
+  const res = await fetch(`${api}/transactions/index`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(apiKey ? { "x-api-key": apiKey } : {}) },
     body: JSON.stringify({ chainId: String(RELAY.SOLANA_CHAIN_ID), txHash: signature, ...(requestId ? { requestId } : {}) }),
@@ -661,8 +663,8 @@ export async function indexRelayTx(signature: string, requestId?: string, apiKey
 }
 
 /** Relay request status: waiting / pending / success / failure / refund ... */
-export async function getRelayStatus(requestId: string): Promise<any> {
-  const res = await fetch(`${RELAY.API}/intents/status/v3?requestId=${requestId}`);
+export async function getRelayStatus(requestId: string, api: string = RELAY.API): Promise<any> {
+  const res = await fetch(`${api}/intents/status/v3?requestId=${requestId}`);
   return res.json();
 }
 

@@ -4,3 +4,7 @@ node_modules
 *.log
 test-ledger
 keys/
+# deploy config with private keys (template: .env.example)
+.env
+.env.*
+!.env.example

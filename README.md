@@ -92,6 +92,8 @@ tests/cross_vault.ts        # integration tests
 scripts/transfer-upgrade-authority.sh  # transfer the program upgrade authority after deployment (e.g. to a Squads multisig)
 scripts/cli.ts              # CLI: yarn -s cli help (initialize, deposit, payout, CCTP bridging, Sepolia receive, events ...)
 docs/devnet-testing-guide.md  # step-by-step devnet testing + reclaiming SOL afterwards
+docs/deployment-guide.md    # deploy + configure with your own wallet key from .env (env-check / deploy / setup)
+.env.example                # template of the deploy config (.env is git-ignored)
 ```
 
 ---
@@ -294,15 +296,27 @@ solana program deploy target/deploy/cross_vault.so --program-id target/deploy/cr
 ```
 Program id: `A38GT8a6E1ySMM91Ly9rNCNbUPfFxLYgUt7X9dFmv2rK`, its keypair is `target/deploy/cross_vault-keypair.json`; back it up (it is deleted together with `target/`).
 
+### Deploying with your own wallet (.env)
+
+See [docs/deployment-guide.md](docs/deployment-guide.md). Put the private key exported from Phantom / Solflare / Backpack, the operator / rebalancer addresses, the pools and the CCTP destination vaults in `.env` (template `.env.example`), then:
+```bash
+yarn -s cli env-check        # check config, network, balance (no tx)
+yarn -s cli deploy           # first deploy or upgrade (admin = upgrade authority)
+yarn -s cli setup --dry-run  # preview: initialize / roles / pools / CCTP routes
+yarn -s cli setup            # apply; idempotent, re-run after editing .env
+```
+All CLI commands read `<ROLE>_PRIVATE_KEY` (e.g. `ADMIN_PRIVATE_KEY`) from `.env` before falling back to `keys/devnet/<role>.json`, so the existing key-file flow keeps working.
+
 ### devnet testing
 
 See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create accounts -> get SOL -> deploy -> initialize -> feature tests -> upgrade -> drain vaults / close the program / reclaim SOL.
 
 ### Mainnet launch steps (in order)
-1. **Deploy**: `solana program deploy ...` (the deploying wallet = upgrade authority)
+1. **Deploy**: `solana program deploy ...` (the deploying wallet = upgrade authority); with `.env`: `ENV_FILE=.env.mainnet yarn -s cli deploy`
 2. **Initialize**: call `initialize` with the deploying wallet (only the upgrade authority can)
 3. **Create pools**: admin calls `create_pool(watermark, per-tx limit)` for every supported token (USDC, USDT ...)
 4. **Register CCTP routes**: admin calls `set_cctp_route(domain, our vault contract)` for every destination chain
+   (steps 2-4 in one go from `.env`: `ENV_FILE=.env.mainnet yarn -s cli setup`, see [docs/deployment-guide.md](docs/deployment-guide.md))
 4.1 **Relay**: check Relay's token account exists for every token you will send (`ATA(mint, 7uTT8Xi5…)`; USDC exists), then run one small end-to-end `rebalance-relay` (e.g. 5 USDC) and confirm arrival and the refund path before automating it
 5. **Transfer the upgrade authority to a multisig**:
    ```bash
@@ -333,4 +347,5 @@ See [docs/devnet-testing-guide.md](docs/devnet-testing-guide.md): create account
 7.1 **USDT**: USDT cannot use CCTP; rebalance it with `rebalance_relay` (or swap to USDC on Solana first); Tether can freeze USDT, so keep the USDT watermark low; the backend decides which token users buy with and get paid in, and must account per `mint`.
 8. **TS**: the Anchor 1.x TS client does not infer `tokenProgram`; pass `TOKEN_PROGRAM_ID` explicitly. Use `confirmed` for the provider.
 9. **Reserved space before mainnet**: consider adding a `_reserved: [u8; N]` field at the end of Config and Pool so future fields can be added through upgrades without data migration.
+9.1 **Deploying from `.env`** (`docs/deployment-guide.md`, tested on a local validator 2026-11-12: deploy, setup, idempotent re-run, role / pool / route changes, upgrade, bad-key and wrong-admin rejections): the admin private key sits in plain text in `.env` while deploying. Use a fresh wallet for it, move admin and the upgrade authority to a multisig after launch, then delete the key from `.env`. `setup` never removes CCTP routes (only adds / updates); `deploy` / `setup` ask for `yes` on mainnet (detected by genesis hash). Not yet run against a real devnet / mainnet RPC.
 10. **Optional enhancements**: on-chain order de-duplication (one PDA per order or a bitmap), multiple operators, a separate per-tx cap for `rebalance_relay` (in a new account, so the Pool layout does not change).
